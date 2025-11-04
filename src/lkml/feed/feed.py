@@ -222,7 +222,7 @@ class FeedProcessor:
         # 尝试从 feed 条目中提取 Message-ID 与 In-Reply-To（基于 Atom threading 扩展与常见字段）
         message_id_header: Optional[str] = None
         in_reply_to_header: Optional[str] = None
-        
+
         # 如果 message_id_header 为空，尝试从 lore.kernel.org 的 href 中提取 message_id
         if not message_id_header and hasattr(entry, "link") and entry.link:
             try:
@@ -236,7 +236,9 @@ class FeedProcessor:
                         # 最后一部分就是 message_id
                         message_id_header = parts[-1]
             except Exception as e:
-                logger.debug(f"Failed to extract message_id from link {entry.link}: {e}")
+                logger.debug(
+                    f"Failed to extract message_id from link {entry.link}: {e}"
+                )
                 pass
         # feedparser 将 thr:in-reply-to 暴露为键 'thr_in-reply-to'，其值是带 'ref' 的字典
         try:

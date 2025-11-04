@@ -47,9 +47,9 @@ class DiscordRenderer(BaseTextRenderer):
 
         embed = {
             "title": f"📧 {subsystem.upper()} 邮件列表更新",
-            "description": "\n".join(description_parts)
-            if description_parts
-            else "无新更新",
+            "description": (
+                "\n".join(description_parts) if description_parts else "无新更新"
+            ),
             "color": color,
             "footer": {"text": "LKML Bot"},
         }

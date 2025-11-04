@@ -91,3 +91,10 @@ module = [
     "nonebot.adapters.*",
 ]
 ignore_missing_imports = true
+
+[tool.black]
+exclude = '''
+/(
+    src/.*/__init__.py
+)/
+'''
