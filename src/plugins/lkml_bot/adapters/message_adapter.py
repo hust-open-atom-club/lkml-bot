@@ -1,15 +1,15 @@
 """消息适配器基类"""
 
-from nonebot.log import logger
 from abc import ABC, abstractmethod
 
 from lkml.feed import SubsystemUpdate
 
-logger = logger
 
+class MessageAdapter(ABC):  # pylint: disable=too-few-public-methods
+    """消息适配器抽象基类
 
-class MessageAdapter(ABC):
-    """消息适配器抽象基类"""
+    这是抽象基类，只定义核心接口方法。
+    """
 
     @abstractmethod
     async def send_subsystem_update(
@@ -21,4 +21,3 @@ class MessageAdapter(ABC):
             subsystem: 子系统名称
             update_data: 更新数据
         """
-        pass

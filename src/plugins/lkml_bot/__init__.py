@@ -10,9 +10,11 @@
   - `.commands.run_monitor`
 """
 
-from nonebot.log import logger
 import sys
 from pathlib import Path
+
+from nonebot import get_driver
+from nonebot.log import logger
 
 # 1) 环境与路径
 # 加载 .env 文件（如果存在）
@@ -31,13 +33,22 @@ src_path = Path(__file__).parent.parent.parent
 if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
-logger = logger
-
 # 2) 基础设施装配（配置、数据库）
-# 注意：这些导入在 sys.path 修改之后，是必要的，因此忽略 E402
+# 注意：这些导入在 sys.path 修改之后，是必要的，因此使用 pylint 注释禁用相关警告
+# 第一方导入（必须在本地导入之前）
+# pylint: disable=wrong-import-position
 from lkml.config import set_config  # noqa: E402
 from lkml.db import set_database, LKMLDatabase, Base  # noqa: E402
+from lkml.feed.feed import FeedProcessor  # noqa: E402
+from lkml.feed.feed_monitor import LKMLFeedMonitor  # noqa: E402
+from lkml.feed.vger_subsystems import get_vger_subsystems  # noqa: E402
+from lkml.scheduler import LKMLScheduler  # noqa: E402
+
+# 本地导入
 from .config import get_config  # noqa: E402
+from .message_sender import MessageSender  # noqa: E402
+
+# pylint: enable=wrong-import-position
 
 # 初始化数据库
 plugin_config = get_config()
@@ -49,22 +60,11 @@ set_database(database)
 
 # 3) 注册子系统来源（数据来源由实现决定）
 try:
-    from lkml.feed.vger_subsystems import get_vger_subsystems  # noqa: E402
-
     plugin_config.set_vger_subsystems_getter(get_vger_subsystems)
-except ImportError:
-    logger.warning(
-        "lkml.vger_cache module not available, vger subsystems will not be provided"
-    )
-except Exception as e:
+except (AttributeError, ValueError) as e:
     logger.warning(f"Failed to register vger subsystems getter: {e}")
 
 # 4) 创建监控与调度实例（使用适配器的消息发送器）
-from lkml.feed.feed import FeedProcessor  # noqa: E402
-from lkml.feed.feed_monitor import LKMLFeedMonitor  # noqa: E402
-from lkml.scheduler import LKMLScheduler  # noqa: E402
-from .message_sender import MessageSender  # noqa: E402
-
 message_sender = MessageSender()
 
 
@@ -79,16 +79,27 @@ monitor = LKMLFeedMonitor(config=plugin_config, processor=processor, database=da
 scheduler = LKMLScheduler(message_sender=send_update_callback)
 scheduler.monitor = monitor
 
+# 将调度器注册到 lkml 层
+# pylint: disable=wrong-import-order,wrong-import-position,import-outside-toplevel
+from lkml.scheduler import (
+    set_scheduler,
+)
+
+set_scheduler(scheduler)
+
 # 5) 导入命令模块，确保处理器在导入时完成注册
-from .commands import help  # noqa: F401, E402
+# pylint: disable=wrong-import-position
+from .commands import help as help_command  # noqa: F401, E402
 from .commands import subscribe  # noqa: F401, E402
 from .commands import unsubscribe  # noqa: F401, E402
 from .commands import start_monitor  # noqa: F401, E402
 from .commands import stop_monitor  # noqa: F401, E402
 from .commands import run_monitor  # noqa: F401, E402
 
+# pylint: enable=wrong-import-position
+
 __all__ = [
-    "help",
+    "help_command",
     "subscribe",
     "unsubscribe",
     "start_monitor",
@@ -98,8 +109,6 @@ __all__ = [
 
 
 # 6) 机器人生命周期：启动/停止钩子
-from nonebot import get_driver  # noqa: E402
-
 driver = get_driver()
 
 
@@ -107,12 +116,18 @@ driver = get_driver()
 async def auto_start_monitoring():
     """在 bot 启动时自动启动监控任务"""
     try:
-        if not scheduler.is_running:
+        # pylint: disable=import-outside-toplevel  # noqa: E402
+        from lkml.scheduler import (
+            get_scheduler,
+        )
+
+        current_scheduler = get_scheduler()
+        if not current_scheduler.is_running:
             logger.info("Auto-starting LKML monitoring scheduler on bot startup")
-            await scheduler.start()
+            await current_scheduler.start()
         else:
             logger.info("LKML monitoring scheduler is already running")
-    except Exception as e:
+    except (RuntimeError, ValueError, AttributeError) as e:
         logger.error(f"Failed to auto-start monitoring scheduler: {e}", exc_info=True)
 
 
@@ -120,8 +135,14 @@ async def auto_start_monitoring():
 async def auto_stop_monitoring():
     """在 bot 关闭时停止监控任务"""
     try:
-        if scheduler.is_running:
+        # pylint: disable=import-outside-toplevel
+        from lkml.scheduler import (
+            get_scheduler,
+        )
+
+        current_scheduler = get_scheduler()
+        if current_scheduler.is_running:
             logger.info("Stopping LKML monitoring scheduler on bot shutdown")
-            await scheduler.stop()
-    except Exception as e:
+            await current_scheduler.stop()
+    except (RuntimeError, ValueError, AttributeError) as e:
         logger.error(f"Failed to stop monitoring scheduler: {e}", exc_info=True)

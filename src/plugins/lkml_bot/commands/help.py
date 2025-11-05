@@ -9,10 +9,10 @@ from ..shared import COMMAND_REGISTRY, BASE_HELP_HEADER, register_command
 
 # 只有当消息 @ 到机器人，且纯文本以 "/help" 开头时才回复
 # 优先级设为 40，block=False 确保如果匹配失败不会阻止其他命令
-help_cmd = on_message(rule=to_me(), priority=40, block=False)
+HelpCmd = on_message(rule=to_me(), priority=40, block=False)
 
 
-@help_cmd.handle()
+@HelpCmd.handle()
 async def handle_help(message: Message = EventMessage()):
     """聚合并展示各命令声明的帮助信息"""
     text = message.extract_plain_text().strip()
@@ -44,7 +44,7 @@ async def handle_help(message: Message = EventMessage()):
                 lines.append(f"• `{usage}` - {desc}")
 
     # 处理 help 命令时使用 finish 会阻止事件传播
-    await help_cmd.finish("\n".join(lines))
+    await HelpCmd.finish("\n".join(lines))
 
 
 # 注册 help 命令自身（公开命令）

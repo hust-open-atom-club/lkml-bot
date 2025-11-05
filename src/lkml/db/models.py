@@ -8,10 +8,11 @@ from sqlalchemy.orm import relationship
 Base = declarative_base()
 
 
-class Subsystem(Base):
+class Subsystem(Base):  # pylint: disable=too-few-public-methods
     """子系统模型
 
     存储邮件列表子系统的信息，用于管理订阅状态。
+    这是 SQLAlchemy ORM 模型，主要作为数据容器，不需要太多公共方法。
     """
 
     __tablename__ = "subsystems"
@@ -28,10 +29,11 @@ class Subsystem(Base):
     email_messages = relationship("EmailMessage", back_populates="subsystem")
 
 
-class EmailMessage(Base):
+class EmailMessage(Base):  # pylint: disable=too-few-public-methods
     """邮件消息模型
 
     存储从邮件列表抓取的单封邮件信息。
+    这是 SQLAlchemy ORM 模型，主要作为数据容器，不需要太多公共方法。
     """
 
     __tablename__ = "email_messages"
@@ -56,10 +58,11 @@ class EmailMessage(Base):
     subsystem = relationship("Subsystem", back_populates="email_messages")
 
 
-class OperationLog(Base):
+class OperationLog(Base):  # pylint: disable=too-few-public-methods
     """操作日志模型
 
     记录用户操作历史，如订阅、取消订阅、启动/停止监控等。
+    这是 SQLAlchemy ORM 模型，主要作为数据容器，不需要太多公共方法。
     """
 
     __tablename__ = "operation_logs"

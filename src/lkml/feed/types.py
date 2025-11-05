@@ -9,6 +9,27 @@ from datetime import datetime
 
 
 @dataclass
+class FeedEntryMetadata:
+    """Feed 条目的元数据信息"""
+
+    sender: Optional[str] = None
+    sender_email: Optional[str] = None
+    content: Optional[str] = None
+    link: Optional[str] = None
+    message_id: Optional[str] = None
+
+
+@dataclass
+class FeedEntryContent:
+    """Feed 条目的内容信息"""
+
+    summary: Optional[str] = None
+    received_at: Optional[str] = None
+    is_reply: bool = False
+    is_patch: bool = False
+
+
+@dataclass
 class FeedEntry:
     """Feed 条目
 
@@ -20,15 +41,8 @@ class FeedEntry:
     author: str = ""
     email: Optional[str] = None
     url: Optional[str] = None
-    summary: Optional[str] = None
-    received_at: Optional[str] = None
-    sender: Optional[str] = None
-    sender_email: Optional[str] = None
-    content: Optional[str] = None
-    link: Optional[str] = None
-    message_id: Optional[str] = None
-    is_reply: bool = False
-    is_patch: bool = False
+    content: FeedEntryContent = field(default_factory=FeedEntryContent)
+    metadata: FeedEntryMetadata = field(default_factory=FeedEntryMetadata)
 
 
 @dataclass
@@ -74,18 +88,25 @@ class SubsystemMonitoringResult:
 
 
 @dataclass
+class MonitoringStatistics:
+    """监控统计信息"""
+
+    total_subsystems: int = 0
+    processed_subsystems: int = 0
+    total_new_count: int = 0
+    total_reply_count: int = 0
+    error_count: int = 0
+
+
+@dataclass
 class MonitoringResult:
     """监控结果
 
     表示一次完整的监控任务的所有结果。
     """
 
-    total_subsystems: int = 0
-    processed_subsystems: int = 0
-    total_new_count: int = 0
-    total_reply_count: int = 0
+    statistics: MonitoringStatistics = field(default_factory=MonitoringStatistics)
     results: List[SubsystemMonitoringResult] = field(default_factory=list)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     errors: Optional[List[str]] = None
-    error_count: int = 0

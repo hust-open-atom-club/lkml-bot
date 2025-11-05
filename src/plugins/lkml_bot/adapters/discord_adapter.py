@@ -3,25 +3,24 @@
 负责将邮件列表更新消息发送到 Discord 平台。
 """
 
-from nonebot.log import logger
-
 try:
     import httpx
 except ImportError:
     httpx = None
 
-from ..config import get_config
+from nonebot.log import logger
+
 from lkml.feed import SubsystemUpdate
+from ..config import get_config
 from ..renders import DiscordRenderer
 from .message_adapter import MessageAdapter
 
-logger = logger
 
-
-class DiscordAdapter(MessageAdapter):
+class DiscordAdapter(MessageAdapter):  # pylint: disable=too-few-public-methods
     """Discord 消息适配器
 
     实现 MessageAdapter 接口，通过 Discord Webhook 发送消息。
+    核心职责是实现消息发送，方法数量是合理的。
     """
 
     def __init__(self):
@@ -66,7 +65,7 @@ class DiscordAdapter(MessageAdapter):
             # 发送 webhook 请求
             async with httpx.AsyncClient() as client:
                 response = await client.post(webhook_url, json=data)
-                if response.status_code == 200 or response.status_code == 204:
+                if response.status_code in {200, 204}:
                     logger.info(
                         f"Successfully sent message via Discord webhook for {subsystem}"
                     )
@@ -75,6 +74,6 @@ class DiscordAdapter(MessageAdapter):
                         f"Failed to send Discord webhook message: "
                         f"status {response.status_code}, {response.text}"
                     )
-        except Exception as e:
+        except (RuntimeError, ValueError, AttributeError, OSError) as e:
             logger.error(f"Failed to send message to Discord: {e}", exc_info=True)
             # 不抛出异常，避免影响主流程

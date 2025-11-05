@@ -1,42 +1,43 @@
 """操作日志辅助模块"""
 
-from nonebot.log import logger
+from dataclasses import dataclass
 from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import OperationLog
 
-logger = logger
+
+@dataclass
+class OperationParams:
+    """操作日志参数对象（减少函数参数数量）"""
+
+    operator_id: str
+    operator_name: str
+    action: str
+    subsystem_name: Optional[str] = None
+    details: Optional[str] = None
 
 
 async def log_operation(
     session: AsyncSession,
-    operator_id: str,
-    operator_name: str,
-    action: str,
-    subsystem_name: Optional[str] = None,
-    details: Optional[str] = None,
+    params: OperationParams,
 ) -> None:
     """记录操作日志
 
     Args:
         session: 数据库会话
-        operator_id: 操作者ID
-        operator_name: 操作者名称
-        action: 操作类型（subscribe, unsubscribe, start_monitor等）
-        subsystem_name: 子系统名称（可选）
-        details: 详细信息（可选）
+        params: 操作日志参数对象
     """
     # 如果 subsystem_name 为 None，使用默认名称
-    target_name = subsystem_name if subsystem_name is not None else "lkml"
+    target_name = params.subsystem_name if params.subsystem_name is not None else "lkml"
 
     log = OperationLog(
-        operator_id=operator_id,
-        operator_name=operator_name,
-        action=action,
+        operator_id=params.operator_id,
+        operator_name=params.operator_name,
+        action=params.action,
         target_name=target_name,
-        details=details,
+        details=params.details,
     )
     session.add(log)
     await session.flush()

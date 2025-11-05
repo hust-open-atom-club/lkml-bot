@@ -5,48 +5,29 @@
 
 import os
 import nonebot
-from nonebot import get_driver
-
-
-def register_adapters_if_empty() -> None:
-    """如果适配器为空，则尝试注册常见适配器"""
-    driver = get_driver()
-    if driver._adapters:  # type: ignore
-        return
-
-    # Best-effort manual registration for common adapters
-    try:
-        from nonebot.adapters.discord import Adapter as DiscordAdapter  # type: ignore
-
-        driver.register_adapter(DiscordAdapter)
-    except Exception:
-        pass
-
-    try:
-        from nonebot.adapters.feishu import Adapter as FeishuAdapter  # type: ignore
-
-        driver.register_adapter(FeishuAdapter)
-    except Exception:
-        pass
 
 
 driver_spec = os.getenv("DRIVER", "~fastapi+~httpx+~websockets")
 nonebot.init(driver=driver_spec)
 
 nonebot.load_from_toml("pyproject.toml")
-try:
-    nonebot.load_adapters()
-except Exception:
-    pass
-register_adapters_if_empty()
 
-# Strict startup: require at least one adapter when STRICT_STARTUP=1
-if os.getenv("STRICT_STARTUP") == "1":
-    driver = get_driver()
-    if not driver._adapters:  # type: ignore
-        raise SystemExit(
-            "STRICT_STARTUP=1 and no adapters loaded. Ensure adapters are installed and configured."
-        )
+# 手动注册适配器（作为 load_from_toml 的后备方案）
+driver = nonebot.get_driver()
+if not getattr(driver, "_adapters", None):
+    try:
+        from nonebot.adapters.discord import Adapter as DiscordAdapter
+
+        driver.register_adapter(DiscordAdapter)
+    except (ImportError, AttributeError, RuntimeError):
+        pass
+
+    try:
+        from nonebot.adapters.feishu import Adapter as FeishuAdapter
+
+        driver.register_adapter(FeishuAdapter)
+    except (ImportError, AttributeError, RuntimeError):
+        pass
 
 app = nonebot.get_asgi()
 

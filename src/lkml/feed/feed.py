@@ -3,22 +3,21 @@
 负责从 lore.kernel.org 抓取邮件列表的 Atom feed，解析邮件内容并存储到数据库。
 """
 
-from nonebot.log import logger
+import hashlib
 import re
+import time
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
 import feedparser
-import time
 from feedparser.util import FeedParserDict
+from nonebot.log import logger
 
-from ..db.models import EmailMessage, Subsystem
-from ..db.repositories import SubsystemRepo, EmailMessageRepo
-from .types import FeedEntry, FeedProcessResult
 from ..config import get_config
-
-logger = logger
+from ..db.models import EmailMessage, Subsystem
+from ..db.repo import EMAIL_MESSAGE_REPO, EmailMessageData, SUBSYSTEM_REPO
+from .types import FeedEntry, FeedEntryContent, FeedProcessResult
 
 
 class FeedProcessor:
@@ -49,12 +48,67 @@ class FeedProcessor:
                     self.last_update_dt = self.last_update_dt.replace(
                         tzinfo=timezone.utc
                     )
-            except Exception:
+            except (ValueError, AttributeError, TypeError):
                 self.last_update_dt = datetime.now(timezone.utc)
         else:
             self.last_update_dt = datetime.now(timezone.utc)
 
         self.database = database
+
+    def _handle_feed_status(self, feed_status: Optional[int], feed_url: str) -> bool:
+        """处理 feed 状态码，返回是否应该继续处理"""
+        if not feed_status:
+            return True
+        if feed_status == 404:
+            logger.error(
+                f"Feed not found (404) for {feed_url}. "
+                "Possibly invalid subsystem or URL."
+            )
+            return False
+        if feed_status >= 400:
+            logger.error(f"HTTP error {feed_status} when fetching {feed_url}.")
+            return False
+        if feed_status != 200:
+            logger.warning(
+                f"Unexpected HTTP status {feed_status} for {feed_url}, "
+                "continue parsing."
+            )
+        return True
+
+    def _handle_feed_bozo(self, feed: FeedParserDict, feed_url: str) -> bool:
+        """处理 feed 解析警告，返回是否应该继续处理"""
+        if not feed.bozo:
+            return True
+        bozo_exception = feed.bozo_exception
+        bozo_message = (
+            str(bozo_exception) if bozo_exception else "Unknown parsing error"
+        )
+        logger.warning(f"Feed parsing warning for {feed_url}: {bozo_message}")
+        if not feed.entries:
+            logger.error(
+                f"Feed parsing failed for {feed_url}: {bozo_message}. No entries."
+            )
+            return False
+        return True
+
+    def _filter_entries_by_date(
+        self, feed_entries: List[FeedParserDict]
+    ) -> List[FeedParserDict]:
+        """根据日期筛选新条目"""
+        entries: List[FeedParserDict] = []
+        for entry in feed_entries:
+            if hasattr(entry, "updated_parsed") and entry.updated_parsed:
+                entry_dt = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
+            else:
+                # 没有时间信息则认为是新条目（保守处理）
+                entries.append(entry)
+                continue
+
+            if entry_dt > self.last_update_dt:
+                entries.append(entry)
+            else:
+                break
+        return entries
 
     def get_feed_entries(self, feed_url: str) -> List[FeedParserDict]:
         """拉取并筛选新条目（带指数退避重试）"""
@@ -67,9 +121,10 @@ class FeedProcessor:
         for attempt in range(1, max_attempts + 1):
             try:
                 feed: FeedParserDict = feedparser.parse(feed_url)
-            except Exception as e:
+            except (OSError, ValueError, KeyError) as e:
                 logger.warning(
-                    f"Attempt {attempt}/{max_attempts} failed to fetch feed: {type(e).__name__}: {e}"
+                    f"Attempt {attempt}/{max_attempts} failed to fetch feed: "
+                    f"{type(e).__name__}: {e}"
                 )
                 if attempt < max_attempts:
                     time.sleep(delay)
@@ -82,45 +137,13 @@ class FeedProcessor:
                 return []
 
             feed_status = getattr(feed, "status", None)
-            if feed_status:
-                if feed_status == 404:
-                    logger.error(
-                        f"Feed not found (404) for {feed_url}. Possibly invalid subsystem or URL."
-                    )
-                    return []
-                elif feed_status >= 400:
-                    logger.error(f"HTTP error {feed_status} when fetching {feed_url}.")
-                    return []
-                elif feed_status != 200:
-                    logger.warning(
-                        f"Unexpected HTTP status {feed_status} for {feed_url}, continue parsing."
-                    )
+            if not self._handle_feed_status(feed_status, feed_url):
+                return []
 
-            if feed.bozo:
-                bozo_exception = feed.bozo_exception
-                bozo_message = (
-                    str(bozo_exception) if bozo_exception else "Unknown parsing error"
-                )
-                logger.warning(f"Feed parsing warning for {feed_url}: {bozo_message}")
-                if not feed.entries:
-                    logger.error(
-                        f"Feed parsing failed for {feed_url}: {bozo_message}. No entries."
-                    )
-                    return []
+            if not self._handle_feed_bozo(feed, feed_url):
+                return []
 
-            entries: List[FeedParserDict] = []
-            for entry in feed.entries:
-                if hasattr(entry, "updated_parsed") and entry.updated_parsed:
-                    entry_dt = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
-                else:
-                    # 没有时间信息则认为是新条目（保守处理）
-                    entries.append(entry)
-                    continue
-
-                if entry_dt > self.last_update_dt:
-                    entries.append(entry)
-                else:
-                    break
+            entries = self._filter_entries_by_date(feed.entries)
 
             if feed.bozo and entries:
                 logger.info(
@@ -156,7 +179,7 @@ class FeedProcessor:
                 return email_match.group(1)
 
             return None
-        except Exception as e:
+        except (AttributeError, TypeError) as e:
             logger.error(f"Failed to extract email from author '{author}': {e}")
             return None
 
@@ -179,6 +202,53 @@ class FeedProcessor:
         lowered = title.lower()
         return "[patch" in lowered or lowered.startswith("patch:")
 
+    def _extract_received_at(self, entry: FeedParserDict) -> datetime:
+        """从条目中提取接收时间"""
+        try:
+            if hasattr(entry, "updated_parsed") and entry.updated_parsed:
+                return datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
+            return datetime.now(timezone.utc)
+        except (ValueError, TypeError, IndexError) as e:
+            logger.warning(f"Failed to parse date for entry {entry.title}: {e}")
+            return datetime.now(timezone.utc)
+
+    def _generate_message_id(
+        self, entry: FeedParserDict, subsystem: Subsystem, received_at: datetime
+    ) -> str:
+        """生成稳定的 message_id"""
+        message_id = entry.get("id") or entry.link
+        if not message_id:
+            base = f"{subsystem.name}|{entry.title}|{int(received_at.timestamp())}"
+            message_id = hashlib.sha256(base.encode("utf-8")).hexdigest()[:40]
+        return message_id
+
+    def _extract_message_id_header(self, entry: FeedParserDict) -> Optional[str]:
+        """从链接中提取 message_id_header"""
+        if not hasattr(entry, "link") or not entry.link:
+            return None
+        try:
+            parsed_url = urlparse(entry.link)
+            path = parsed_url.path.strip("/")
+            if path:
+                parts = path.split("/")
+                if len(parts) >= 2:
+                    return parts[-1]
+        except (ValueError, AttributeError) as e:
+            logger.debug(f"Failed to extract message_id from link {entry.link}: {e}")
+        return None
+
+    def _extract_in_reply_to_header(self, entry: FeedParserDict) -> Optional[str]:
+        """从条目中提取 in_reply_to_header"""
+        try:
+            thr = entry.get("thr_in-reply-to") or entry.get("thr:in-reply-to")
+            if isinstance(thr, dict):
+                ref = thr.get("ref")
+                if isinstance(ref, str):
+                    return ref
+        except (AttributeError, TypeError):
+            pass
+        return None
+
     async def save_email_message(
         self, session, entry: FeedParserDict, subsystem: Subsystem
     ) -> EmailMessage:
@@ -193,65 +263,20 @@ class FeedProcessor:
             保存的邮件消息对象
         """
         email = self.extract_email_from_author(entry.author)
+        received_at = self._extract_received_at(entry)
+        message_id = self._generate_message_id(entry, subsystem, received_at)
 
-        try:
-            if hasattr(entry, "updated_parsed") and entry.updated_parsed:
-                received_at = datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
-            else:
-                received_at = datetime.now(timezone.utc)
-        except Exception as e:
-            logger.warning(f"Failed to parse date for entry {entry.title}: {e}")
-            received_at = datetime.now()
-
-        # 生成稳定 message_id：优先 link，其次 title+time+subsystem 的哈希
-        message_id = entry.get("id") or entry.link
-        if not message_id:
-            base = f"{subsystem.name}|{entry.title}|{int(received_at.timestamp())}"
-            import hashlib
-
-            message_id = hashlib.sha256(base.encode("utf-8")).hexdigest()[:40]
-
-        existing_message = await EmailMessageRepo.find_by_message_id(
+        existing_message = await EMAIL_MESSAGE_REPO.find_by_message_id(
             session, message_id
         )
-
         if existing_message:
             logger.debug(f"Message already exists: {message_id}")
             return existing_message
 
-        # 尝试从 feed 条目中提取 Message-ID 与 In-Reply-To（基于 Atom threading 扩展与常见字段）
-        message_id_header: Optional[str] = None
-        in_reply_to_header: Optional[str] = None
+        message_id_header = self._extract_message_id_header(entry)
+        in_reply_to_header = self._extract_in_reply_to_header(entry)
 
-        # 如果 message_id_header 为空，尝试从 lore.kernel.org 的 href 中提取 message_id
-        if not message_id_header and hasattr(entry, "link") and entry.link:
-            try:
-                parsed_url = urlparse(entry.link)
-                # lore.kernel.org 的链接格式: https://lore.kernel.org/rust-for-linux/77c5bfc6-e2e3-4606-8278-c64ab7a50dd7@leemhuis.info/
-                # message_id 是路径的最后一部分（去掉末尾的斜杠）
-                path = parsed_url.path.strip("/")
-                if path:
-                    parts = path.split("/")
-                    if len(parts) >= 2:
-                        # 最后一部分就是 message_id
-                        message_id_header = parts[-1]
-            except Exception as e:
-                logger.debug(
-                    f"Failed to extract message_id from link {entry.link}: {e}"
-                )
-                pass
-        # feedparser 将 thr:in-reply-to 暴露为键 'thr_in-reply-to'，其值是带 'ref' 的字典
-        try:
-            thr = entry.get("thr_in-reply-to") or entry.get("thr:in-reply-to")
-            if isinstance(thr, dict):
-                ref = thr.get("ref")
-                if isinstance(ref, str):
-                    in_reply_to_header = ref
-        except Exception:
-            pass
-
-        email_message = await EmailMessageRepo.create(
-            session,
+        data = EmailMessageData(
             subsystem=subsystem,
             message_id=message_id,
             subject=entry.title,
@@ -263,8 +288,57 @@ class FeedProcessor:
             message_id_header=message_id_header,
             in_reply_to_header=in_reply_to_header,
         )
+        return await EMAIL_MESSAGE_REPO.create(session, data=data)
 
-        return email_message
+    def _create_feed_entry(
+        self, email_message: EmailMessage, entry: FeedParserDict
+    ) -> FeedEntry:
+        """创建 FeedEntry 对象"""
+        is_reply = self.is_reply_message(entry.title)
+        is_patch = self.is_patch_message(entry.title)
+        content = FeedEntryContent(
+            summary=entry.get("summary", "") or entry.get("description", ""),
+            received_at=email_message.received_at.isoformat(),
+            is_reply=is_reply,
+            is_patch=is_patch,
+        )
+        return FeedEntry(
+            id=email_message.id,
+            subject=entry.title,
+            author=entry.author,
+            email=self.extract_email_from_author(entry.author),
+            url=entry.link,
+            content=content,
+        )
+
+    async def _process_entries(
+        self, session, entries: List[FeedParserDict], subsystem: Subsystem
+    ) -> Tuple[int, int, List[FeedEntry]]:
+        """处理条目并返回统计信息"""
+        new_count = 0
+        reply_count = 0
+        processed_entries: List[FeedEntry] = []
+
+        for entry in entries:
+            email_message = await self.save_email_message(session, entry, subsystem)
+            is_reply = self.is_reply_message(entry.title)
+            if is_reply:
+                reply_count += 1
+            else:
+                new_count += 1
+            processed_entries.append(self._create_feed_entry(email_message, entry))
+
+        return (new_count, reply_count, processed_entries)
+
+    def _update_last_update_time(self, entries: List[FeedParserDict]) -> None:
+        """更新最后更新时间"""
+        if not entries:
+            return
+        latest_entry = entries[0]
+        if hasattr(latest_entry, "updated_parsed") and latest_entry.updated_parsed:
+            self.last_update_dt = datetime(
+                *latest_entry.updated_parsed[:6], tzinfo=timezone.utc
+            )
 
     async def process_feed(
         self, subsystem_name: str, feed_url: str
@@ -288,52 +362,19 @@ class FeedProcessor:
                 subsystem=subsystem_name, new_count=0, reply_count=0, entries=[]
             )
 
-        new_count = 0
-        reply_count = 0
-        processed_entries: List[FeedEntry] = []
-
         async with self.database.get_db_session() as session:
-            # 检查/创建子系统
-            subsystem = await SubsystemRepo.get_or_create(session, subsystem_name)
-
-            for entry in entries:
-                email_message = await self.save_email_message(session, entry, subsystem)
-
-                is_reply = self.is_reply_message(entry.title)
-                is_patch = self.is_patch_message(entry.title)
-
-                if is_reply:
-                    reply_count += 1
-                else:
-                    new_count += 1
-
-                processed_entries.append(
-                    FeedEntry(
-                        id=email_message.id,
-                        subject=entry.title,
-                        author=entry.author,
-                        email=self.extract_email_from_author(entry.author),
-                        url=entry.link,
-                        summary=entry.get("summary", "")
-                        or entry.get("description", ""),
-                        received_at=email_message.received_at.isoformat(),
-                        is_reply=is_reply,
-                        is_patch=is_patch,
-                    )
-                )
-
+            subsystem = await SUBSYSTEM_REPO.get_or_create(session, subsystem_name)
+            new_count, reply_count, processed_entries = await self._process_entries(
+                session, entries, subsystem
+            )
             await session.commit()
 
-        if entries:
-            latest_entry = entries[0]
-            if hasattr(latest_entry, "updated_parsed") and latest_entry.updated_parsed:
-                self.last_update_dt = datetime(
-                    *latest_entry.updated_parsed[:6], tzinfo=timezone.utc
-                )
+        self._update_last_update_time(entries)
 
         proc_ms = int((time.time() - proc_start) * 1000)
         logger.info(
-            f"Processed {len(entries)} entries for {subsystem_name}: {new_count} new, {reply_count} replies, took {proc_ms} ms"
+            f"Processed {len(entries)} entries for {subsystem_name}: "
+            f"{new_count} new, {reply_count} replies, took {proc_ms} ms"
         )
 
         return FeedProcessResult(

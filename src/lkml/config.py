@@ -8,44 +8,66 @@ __all__ = ["Config", "LKMLConfig", "set_config", "get_config"]
 
 
 class Config(Protocol):
-    """配置接口（使用 Protocol 避免与 Pydantic 字段冲突）"""
+    """配置接口（使用 Protocol 避免与 Pydantic 字段冲突）
+
+    注意：Protocol 中的 `...` 是必需的占位符，表示抽象方法。
+    """
 
     @property
     def database_url(self) -> str:
         """数据库连接URL"""
-        ...
+        ...  # pylint: disable=unnecessary-ellipsis  # Protocol 必需，表示抽象属性
 
     def get_supported_subsystems(self) -> List[str]:
         """获取支持的子系统列表（动态合并 vger 缓存和手动配置）"""
-        ...
+        ...  # pylint: disable=unnecessary-ellipsis  # Protocol 必需，表示抽象方法
 
     @property
     def max_news_count(self) -> int:
         """最大新闻数量"""
-        ...
+        ...  # pylint: disable=unnecessary-ellipsis  # Protocol 必需，表示抽象属性
 
     @property
     def monitoring_interval(self) -> int:
         """监控任务执行周期（秒）"""
-        ...
+        ...  # pylint: disable=unnecessary-ellipsis  # Protocol 必需，表示抽象属性
 
 
-# 全局配置实例（由插件层注入）
-_config: Optional[Config] = None
+# 配置单例管理器（避免使用全局变量）
+class _ConfigManager:
+    """配置管理器（单例模式）"""
+
+    _instance: Optional["_ConfigManager"] = None
+    _config: Optional[Config] = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def set_config(self, config: Config) -> None:
+        """设置配置实例"""
+        self._config = config
+
+    def get_config(self) -> Config:
+        """获取配置实例"""
+        if self._config is None:
+            raise RuntimeError("Config not initialized. Call set_config() first.")
+        return self._config
+
+
+_config_manager = _ConfigManager()
 
 
 def set_config(config: Config) -> None:
     """设置配置实例"""
-    global _config
-    _config = config
+    _config_manager.set_config(config)
 
 
 def get_config() -> Config:
     """获取配置实例"""
-    if _config is None:
-        raise RuntimeError("Config not initialized. Call set_config() first.")
+    config = _config_manager.get_config()
     # 验证配置对象的完整性
-    config = _config
     # 注意：使用 getattr 安全获取属性，避免属性不存在时的错误
     database_url = getattr(config, "database_url", None)
     max_news_count = getattr(config, "max_news_count", None)
@@ -84,7 +106,13 @@ class LKMLConfig(BaseModel):
         None  # 用于获取 vger 缓存中的子系统
     )
 
-    class Config:
+    class Config:  # pylint: disable=too-few-public-methods
+        """Pydantic 配置类
+
+        这是 Pydantic 的内部配置类，只包含必要的配置属性。
+        Pydantic 要求使用此类来配置模型行为，公共方法数量是合理的。
+        """
+
         arbitrary_types_allowed = True
 
     def set_vger_subsystems_getter(self, getter: Callable[[], List[str]]) -> None:
@@ -121,7 +149,7 @@ class LKMLConfig(BaseModel):
                 # 确保返回的是列表，如果返回 None 则使用空列表
                 if result is not None:
                     vger_subsystems = result if isinstance(result, list) else []
-            except Exception as e:
+            except (TypeError, ValueError, AttributeError) as e:
                 logger.warning(f"Failed to get vger subsystems: {e}")
 
         # 确保 manual_subsystems 不为 None
@@ -133,6 +161,51 @@ class LKMLConfig(BaseModel):
         all_subsystems = list(set(vger_subsystems + manual_subsystems))
         return sorted(all_subsystems)
 
+    @staticmethod
+    def _parse_manual_subsystems() -> List[str]:
+        """从环境变量解析手动配置的子系统"""
+        import os  # pylint: disable=import-outside-toplevel
+
+        manual_subsystems_env = os.getenv("LKML_MANUAL_SUBSYSTEMS")
+        if manual_subsystems_env and manual_subsystems_env.strip():
+            return [s.strip() for s in manual_subsystems_env.split(",") if s.strip()]
+        return []
+
+    @staticmethod
+    def _get_database_url(database_url: Optional[str]) -> Optional[str]:
+        """获取数据库URL（优先参数，其次环境变量）"""
+        import os  # pylint: disable=import-outside-toplevel
+
+        if database_url and database_url.strip():
+            return database_url
+        database_url_env = os.getenv("LKML_DATABASE_URL")
+        if database_url_env and database_url_env.strip():
+            return database_url_env
+        return None
+
+    @staticmethod
+    def _get_int_env(env_name: str, default: Optional[int] = None) -> Optional[int]:
+        """从环境变量获取整数值"""
+        import os  # pylint: disable=import-outside-toplevel
+
+        env_value = os.getenv(env_name)
+        if env_value and env_value.strip():
+            try:
+                return int(env_value)
+            except ValueError:
+                return default
+        return default
+
+    @staticmethod
+    def _get_str_env(env_name: str, default: Optional[str] = None) -> Optional[str]:
+        """从环境变量获取字符串值"""
+        import os  # pylint: disable=import-outside-toplevel
+
+        env_value = os.getenv(env_name)
+        if env_value and env_value.strip():
+            return env_value.strip()
+        return default
+
     @classmethod
     def from_env(cls, database_url: Optional[str] = None) -> "LKMLConfig":
         """从环境变量创建配置
@@ -140,72 +213,24 @@ class LKMLConfig(BaseModel):
         注意：如果没有提供环境变量，将使用类字段的默认值。
         这样可以通过设置环境变量来测试不同的配置值。
         """
-        import os
+        # 解析各配置项
+        manual_subsystems = cls._parse_manual_subsystems()
+        final_database_url = cls._get_database_url(database_url)
+        max_news_count = cls._get_int_env("LKML_MAX_NEWS_COUNT")
+        monitoring_interval_raw = cls._get_int_env("LKML_MONITORING_INTERVAL")
+        monitoring_interval = (
+            max(monitoring_interval_raw, 60) if monitoring_interval_raw else None
+        )
+        last_update_dt_override_iso = cls._get_str_env("LKML_LAST_UPDATE_AT")
 
-        # 处理手动配置的子系统（LKML_MANUAL_SUBSYSTEMS）
-        manual_subsystems_env = os.getenv("LKML_MANUAL_SUBSYSTEMS")
-        if manual_subsystems_env and manual_subsystems_env.strip():
-            manual_subsystems = [
-                s.strip() for s in manual_subsystems_env.split(",") if s.strip()
-            ]
-        else:
-            manual_subsystems = []
-
-        # 获取 database_url（优先使用参数，其次环境变量，最后使用类默认值）
-        if database_url and database_url.strip():
-            final_database_url = database_url
-        else:
-            database_url_env = os.getenv("LKML_DATABASE_URL")
-            if database_url_env and database_url_env.strip():
-                final_database_url = database_url_env
-            else:
-                # 使用类定义的默认值
-                final_database_url = None  # 将使用类字段的默认值
-
-        # 获取 max_news_count（从环境变量读取，如果没有则使用类默认值）
-        max_news_count = None
-        max_news_count_env = os.getenv("LKML_MAX_NEWS_COUNT")
-        if max_news_count_env and max_news_count_env.strip():
-            try:
-                max_news_count = int(max_news_count_env)
-            except ValueError:
-                max_news_count = None  # 使用类默认值
-
-        # 获取 monitoring_interval（从环境变量读取，如果没有则使用类默认值）
-        monitoring_interval = None
-        monitoring_interval_env = os.getenv("LKML_MONITORING_INTERVAL")
-        if monitoring_interval_env and monitoring_interval_env.strip():
-            try:
-                monitoring_interval = int(monitoring_interval_env)
-                # 最小周期为 60 秒（1 分钟），避免过于频繁的请求
-                if monitoring_interval < 60:
-                    monitoring_interval = 60
-            except ValueError:
-                monitoring_interval = None  # 使用类默认值
-
-        # Debug: 显式覆盖 last_update_dt（ISO8601 字符串，例如 2025-11-03T12:00:00Z）
-        last_update_dt_override_iso_env = os.getenv("LKML_LAST_UPDATE_AT")
-        last_update_dt_override_iso: Optional[str] = None
-        if last_update_dt_override_iso_env and last_update_dt_override_iso_env.strip():
-            last_update_dt_override_iso = last_update_dt_override_iso_env.strip()
-
-        # 构建配置对象
-        # 只传递明确设置的值，未设置的将使用类字段的默认值
-        config_dict = {
-            "manual_subsystems": manual_subsystems,
-        }
-
-        # 如果提供了 database_url，使用提供的值；否则使用类默认值
+        # 构建配置字典
+        config_dict = {"manual_subsystems": manual_subsystems}
         if final_database_url:
             config_dict["database_url"] = final_database_url
-
-        # 如果环境变量提供了值，使用环境变量的值；否则使用类默认值
         if max_news_count is not None:
             config_dict["max_news_count"] = max_news_count
-
         if monitoring_interval is not None:
             config_dict["monitoring_interval"] = monitoring_interval
-
         if last_update_dt_override_iso is not None:
             config_dict["last_update_dt_override_iso"] = last_update_dt_override_iso
 

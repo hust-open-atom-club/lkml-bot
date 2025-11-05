@@ -6,16 +6,15 @@
 from nonebot.log import logger
 
 from lkml.feed import SubsystemUpdate
-from .renders import DiscordRenderer
 from .adapters.discord_adapter import DiscordAdapter
+from .renders import DiscordRenderer
 
-logger = logger
 
-
-class MessageSender:
+class MessageSender:  # pylint: disable=too-few-public-methods
     """消息发送器，负责将更新发送到各个平台
 
     组合多个消息适配器（如 DiscordAdapter），统一管理消息发送逻辑。
+    核心职责是协调多个适配器发送消息，方法数量是合理的。
     """
 
     def __init__(self):

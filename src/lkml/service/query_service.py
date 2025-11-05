@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-from nonebot.log import logger
 from typing import Optional
 
 from sqlalchemy import select
+from nonebot.log import logger
 
 from ..config import get_config
 from ..db.database import get_database
 from ..db.models import EmailMessage, OperationLog, Subsystem
-
-logger = logger
 
 
 class QueryService:
@@ -63,7 +61,7 @@ class QueryService:
                     }
                     for msg in messages
                 ]
-        except Exception as e:
+        except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(f"Failed to get latest news: {e}")
             return []
 
@@ -101,7 +99,7 @@ class QueryService:
                     }
                     for log in logs
                 ]
-        except Exception as e:
+        except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(f"Failed to get operation logs: {e}")
             return []
 

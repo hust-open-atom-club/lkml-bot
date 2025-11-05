@@ -3,16 +3,12 @@
 import asyncio
 import time
 import uuid
+from typing import Awaitable, Callable, Optional
+
 from nonebot.log import logger
-from typing import Callable, Awaitable, Optional
 
 from .config import get_config
-from .feed.types import (
-    MonitoringResult,
-    SubsystemUpdate,
-)
-
-logger = logger
+from .feed.types import MonitoringResult, SubsystemUpdate
 
 
 class LKMLScheduler:
@@ -59,7 +55,7 @@ class LKMLScheduler:
 
                 # 通过回调发送到各个平台
                 await self.message_sender(result.subsystem, update_data)
-        except Exception as e:
+        except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(f"Failed to send feed updates: {e}")
 
     async def monitoring_task(self) -> None:
@@ -71,14 +67,21 @@ class LKMLScheduler:
                 self.cycle_index += 1
                 cycle_start = time.time()
                 logger.info(
-                    f"[run_id={self.run_id} cycle={self.cycle_index}] About to run feed monitoring..."
+                    f"[run_id={self.run_id} cycle={self.cycle_index}] "
+                    "About to run feed monitoring..."
                 )
                 # 运行feed监控
                 monitoring_result = await self.monitor.run_monitoring()
                 cycle_ms = int((time.time() - cycle_start) * 1000)
+                stats = monitoring_result.statistics
                 logger.info(
-                    f"[run_id={self.run_id} cycle={self.cycle_index}] Completed: processed {monitoring_result.processed_subsystems}/{monitoring_result.total_subsystems} subsystems, "
-                    f"{monitoring_result.total_new_count} new, {monitoring_result.total_reply_count} replies, took {cycle_ms} ms"
+                    f"[run_id={self.run_id} cycle={self.cycle_index}] "
+                    f"Completed: processed "
+                    f"{stats.processed_subsystems}/"
+                    f"{stats.total_subsystems} subsystems, "
+                    f"{stats.total_new_count} new, "
+                    f"{stats.total_reply_count} replies, "
+                    f"took {cycle_ms} ms"
                 )
 
                 # 发送更新
@@ -88,11 +91,12 @@ class LKMLScheduler:
                 config = get_config()
                 interval = config.monitoring_interval
                 logger.info(
-                    f"[run_id={self.run_id} cycle={self.cycle_index}] Waiting {interval}s until next cycle"
+                    f"[run_id={self.run_id} cycle={self.cycle_index}] "
+                    f"Waiting {interval}s until next cycle"
                 )
                 await asyncio.sleep(interval)
 
-            except Exception as e:
+            except (RuntimeError, ValueError, AttributeError) as e:
                 logger.error(f"Error in monitoring task: {e}", exc_info=True)
                 # 出错时等待1分钟后重试
                 await asyncio.sleep(60)
@@ -108,10 +112,11 @@ class LKMLScheduler:
             subsystems = get_config().get_supported_subsystems()
             if not subsystems:
                 logger.warning(
-                    "No subsystems configured. Scheduler will not start. Configure LKML_MANUAL_SUBSYSTEMS or provide vger subsystems."
+                    "No subsystems configured. Scheduler will not start. "
+                    "Configure LKML_MANUAL_SUBSYSTEMS or provide vger subsystems."
                 )
                 return
-        except Exception:
+        except (AttributeError, ValueError, RuntimeError):
             logger.warning(
                 "Failed to read subsystems from config; scheduler not started."
             )
@@ -145,3 +150,50 @@ class LKMLScheduler:
         monitoring_result = await self.monitor.run_monitoring()
         await self.send_feed_updates(monitoring_result)
         return monitoring_result
+
+
+# 调度器单例管理器（避免使用全局变量）
+class _SchedulerManager:
+    """调度器管理器（单例模式）"""
+
+    _instance: Optional["_SchedulerManager"] = None
+    _scheduler: Optional[LKMLScheduler] = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def set_scheduler(self, scheduler: LKMLScheduler) -> None:
+        """设置调度器实例"""
+        self._scheduler = scheduler
+
+    def get_scheduler(self) -> LKMLScheduler:
+        """获取调度器实例"""
+        if self._scheduler is None:
+            raise RuntimeError("Scheduler not initialized. Call set_scheduler() first.")
+        return self._scheduler
+
+
+_scheduler_manager = _SchedulerManager()
+
+
+def set_scheduler(scheduler: LKMLScheduler) -> None:
+    """设置调度器实例
+
+    Args:
+        scheduler: 调度器实例
+    """
+    _scheduler_manager.set_scheduler(scheduler)
+
+
+def get_scheduler() -> LKMLScheduler:
+    """获取调度器实例
+
+    Returns:
+        调度器实例
+
+    Raises:
+        RuntimeError: 如果调度器未初始化
+    """
+    return _scheduler_manager.get_scheduler()

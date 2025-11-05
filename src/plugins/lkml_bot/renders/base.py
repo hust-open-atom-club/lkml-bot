@@ -13,10 +13,11 @@ import html
 from lkml.feed import FeedEntry, SubsystemUpdate
 
 
-class BaseRenderer(ABC):
+class BaseRenderer(ABC):  # pylint: disable=too-few-public-methods
     """渲染器基类
 
     定义了渲染子系统更新消息的抽象接口，不同平台可实现各自的渲染逻辑。
+    这是抽象基类，只定义核心接口方法。
     """
 
     @abstractmethod
@@ -32,7 +33,6 @@ class BaseRenderer(ABC):
         Returns:
             渲染后的消息（格式取决于具体实现）
         """
-        pass
 
 
 class BaseTextRenderer(BaseRenderer):
@@ -125,12 +125,12 @@ class BaseTextRenderer(BaseRenderer):
         author = (
             entry.author
             if entry.author
-            else (entry.sender if entry.sender else "Unknown")
+            else (entry.metadata.sender if entry.metadata.sender else "Unknown")
         )
         email = (
             entry.email
             if entry.email
-            else (entry.sender_email if entry.sender_email else None)
+            else (entry.metadata.sender_email if entry.metadata.sender_email else None)
         )
         return author, email
 
@@ -194,7 +194,7 @@ class BaseTextRenderer(BaseRenderer):
                     cleaned_lines.append(ln)
             text = "\n".join(cleaned_lines).strip()
             return text
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             return raw.strip()
 
     def _get_excerpt(
@@ -204,7 +204,7 @@ class BaseTextRenderer(BaseRenderer):
 
         优先使用 summary，其次 content。
         """
-        source = entry.summary or entry.content or ""
+        source = entry.content.summary or entry.metadata.content or ""
         if not source:
             return ""
         text = self._clean_text(source)

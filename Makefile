@@ -10,6 +10,7 @@ prepare-env:
 	@if [ ! -d "virt-py" ]; then \
 		$(PYTHON) -m venv virt-py --copies; \
 		$(VENV_PIP) install -r requirements.txt; \
+		$(VENV_PIP) install -e .; \
 	else \
 		echo "Virtual environment 'virt-py' already exists"; \
 	fi
@@ -27,4 +28,5 @@ check-fmt: prepare-env
 	$(VENV_PY) -m black --check bot.py src/
 
 check-lint: prepare-env
+	@$(VENV_PIP) install -e . > /dev/null 2>&1 || true  # 确保运行时依赖已安装
 	$(VENV_PY) -m pylint bot.py $$(find src -type f -name "*.py")

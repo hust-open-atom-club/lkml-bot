@@ -11,24 +11,48 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sess
 __all__ = ["Database", "LKMLDatabase", "set_database", "get_database"]
 
 
-class Database(ABC):
+class Database(ABC):  # pylint: disable=too-few-public-methods
     """数据库接口
 
     定义数据库访问的抽象接口，支持不同的数据库实现。
+    这是抽象基类，只定义核心接口方法。
     """
 
     @abstractmethod
-    def get_db_session(self):
+    async def get_db_session(self):
         """获取数据库会话（返回异步上下文管理器）
 
         Returns:
             异步上下文管理器，用于获取数据库会话
+
+        注意：子类实现为 async 方法是合理的，因为需要异步创建会话。
         """
-        pass
 
 
-# 全局数据库实例（由插件层注入）
-_database: Optional[Database] = None
+# 数据库单例管理器（避免使用全局变量）
+class _DatabaseManager:
+    """数据库管理器（单例模式）"""
+
+    _instance: Optional["_DatabaseManager"] = None
+    _database: Optional[Database] = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def set_database(self, database: Database) -> None:
+        """设置数据库实例"""
+        self._database = database
+
+    def get_database(self) -> Database:
+        """获取数据库实例"""
+        if self._database is None:
+            raise RuntimeError("Database not initialized. Call set_database() first.")
+        return self._database
+
+
+_database_manager = _DatabaseManager()
 
 
 def set_database(database: Database) -> None:
@@ -37,8 +61,7 @@ def set_database(database: Database) -> None:
     Args:
         database: 数据库实现实例
     """
-    global _database
-    _database = database
+    _database_manager.set_database(database)
 
 
 def get_database() -> Database:
@@ -50,15 +73,14 @@ def get_database() -> Database:
     Raises:
         RuntimeError: 如果数据库未初始化
     """
-    if _database is None:
-        raise RuntimeError("Database not initialized. Call set_database() first.")
-    return _database
+    return _database_manager.get_database()
 
 
-class LKMLDatabase(Database):
+class LKMLDatabase(Database):  # pylint: disable=too-few-public-methods
     """LKML 数据库实现
 
     使用 SQLAlchemy 实现异步数据库访问，支持自动建表。
+    主要提供数据库会话管理，方法数量是合理的。
     """
 
     def __init__(self, database_url: str, base):
@@ -99,7 +121,7 @@ class LKMLDatabase(Database):
             self._tables_created = True
 
     @asynccontextmanager
-    async def get_db_session(self):
+    async def get_db_session(self):  # type: ignore[override]
         """获取数据库会话
 
         Yields:

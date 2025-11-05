@@ -6,17 +6,13 @@
 - 插件元数据
 """
 
-from nonebot.plugin import PluginMetadata
-from nonebot.adapters import Event
-from typing import Callable, Awaitable, Any
 from functools import wraps
+from typing import Any, Awaitable, Callable, Optional, Tuple
 
-try:
-    from nonebot.adapters.discord import (
-        GuildMessageCreateEvent as DiscordGuildMessageEvent,
-    )  # type: ignore
-except Exception:
-    DiscordGuildMessageEvent = None  # type: ignore
+from nonebot.adapters import Event
+from nonebot.exception import FinishedException
+from nonebot.log import logger
+from nonebot.plugin import PluginMetadata
 
 
 __plugin_meta__ = PluginMetadata(
@@ -98,15 +94,89 @@ def require_admin(func: Callable[..., Awaitable[Any]]):
     return wrapper
 
 
-def _is_admin(event: Event) -> bool:
+def _is_admin(_event: Event) -> bool:
     """判断事件发起者是否为管理员。
 
     规则（任一满足）：
     1) Discord: 用户 ID 在 `discord_admin_user_ids` 或拥有 `discord_admin_role_ids` 中的角色
     2) 回退: 用户 ID 在 `superusers` 配置中
     """
-
     return True
+
+
+def extract_command(text: str, command: str) -> Optional[str]:
+    """从文本中提取命令。
+
+    参数:
+        text: 原始文本
+        command: 命令名称（如 "/start-monitor"）
+
+    返回:
+        如果找到命令，返回从命令开始的文本，否则返回 None
+    """
+    text = text.strip()
+    if text.startswith(command):
+        return text
+    idx = text.find(command)
+    if idx >= 0:
+        return text[idx:].strip()
+    return None
+
+
+def get_user_info(event: Event) -> Tuple[str, str]:
+    """从事件中提取用户ID和用户名。
+
+    参数:
+        event: 事件对象
+
+    返回:
+        (user_id, user_name) 元组
+
+    异常:
+        FinishedException: 如果事件处理已完成，重新抛出
+        Exception: 其他错误会被记录并重新抛出
+    """
+    try:
+        user_id = event.get_user_id()
+        user_name = user_id
+        if hasattr(event, "author"):
+            author = getattr(event, "author", {})
+            if isinstance(author, dict):
+                user_name = author.get("username", user_id)
+            elif hasattr(author, "username"):
+                user_name = author.username
+            elif hasattr(author, "global_name"):
+                user_name = author.global_name or user_id
+        logger.debug(f"Operator: {user_id} ({user_name})")
+        return (user_id, user_name)
+    except FinishedException:
+        raise  # 重新抛出 FinishedException，这是正常流程
+    except Exception as e:
+        logger.error(f"Failed to get user info: {e}")
+        raise
+
+
+async def get_user_info_or_finish(event: Event, matcher) -> Tuple[str, str]:
+    """获取用户信息，如果失败则结束命令处理。
+
+    这是一个辅助函数，用于减少命令处理函数中的重复代码。
+
+    参数:
+        event: 事件对象
+        matcher: Matcher 对象，用于结束命令处理
+
+    返回:
+        (user_id, user_name) 元组
+
+    异常:
+        FinishedException: 如果无法获取用户信息，会调用 matcher.finish() 并抛出此异常
+    """
+    try:
+        return get_user_info(event)
+    except (AttributeError, ValueError, TypeError) as exc:
+        await matcher.finish("❌ 无法获取用户信息")
+        # finish() 会抛出 FinishedException，所以这里实际上不会执行
+        raise FinishedException from exc
 
 
 # 基础提示（头部）

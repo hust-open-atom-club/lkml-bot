@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-from nonebot.log import logger
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from nonebot.log import logger
 
 from ..config import get_config
 from ..db.database import get_database
 from ..db.models import Subsystem
-from .operation_log_service import log_operation
-
-logger = logger
+from .operation_log_service import OperationParams, log_operation
 
 
 class SubsystemService:
@@ -52,13 +50,19 @@ class SubsystemService:
                 await session.commit()
 
                 # 记录操作日志
-                await log_operation(
-                    session, operator_id, operator_name, "subscribe", subsystem_name
+                await log_operation(  # pylint: disable=duplicate-code
+                    session,
+                    OperationParams(
+                        operator_id=operator_id,
+                        operator_name=operator_name,
+                        action="subscribe",
+                        subsystem_name=subsystem_name,
+                    ),
                 )
 
                 logger.info(f"Operator {operator_name} subscribed to {subsystem_name}")
                 return True
-        except Exception as e:
+        except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(f"Failed to subscribe subsystem: {e}")
             return False
 
@@ -92,15 +96,21 @@ class SubsystemService:
                 await session.commit()
 
                 # 记录操作日志
-                await log_operation(
-                    session, operator_id, operator_name, "unsubscribe", subsystem_name
+                await log_operation(  # pylint: disable=duplicate-code
+                    session,
+                    OperationParams(
+                        operator_id=operator_id,
+                        operator_name=operator_name,
+                        action="unsubscribe",
+                        subsystem_name=subsystem_name,
+                    ),
                 )
 
                 logger.info(
                     f"Operator {operator_name} unsubscribed from {subsystem_name}"
                 )
                 return True
-        except Exception as e:
+        except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(f"Failed to unsubscribe subsystem: {e}")
             return False
 
@@ -117,7 +127,7 @@ class SubsystemService:
                     select(Subsystem.name).where(Subsystem.subscribed)
                 )
                 return [row[0] for row in result.fetchall()]
-        except Exception as e:
+        except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(f"Failed to get subscribed subsystems: {e}")
             return []
 

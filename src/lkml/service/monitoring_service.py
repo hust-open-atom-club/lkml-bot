@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from nonebot.log import logger
 from typing import TYPE_CHECKING
 
+from nonebot.log import logger
+
 from ..db.database import get_database
-from .operation_log_service import log_operation
+from .operation_log_service import OperationParams, log_operation
 
 if TYPE_CHECKING:
     from ..scheduler import LKMLScheduler
-
-logger = logger
 
 
 class MonitoringService:
@@ -42,13 +41,18 @@ class MonitoringService:
             # 记录操作日志
             database = get_database()
             async with database.get_db_session() as session:
-                await log_operation(
-                    session, operator_id, operator_name, "start_monitor", None
+                await log_operation(  # pylint: disable=duplicate-code
+                    session,
+                    OperationParams(
+                        operator_id=operator_id,
+                        operator_name=operator_name,
+                        action="start_monitor",
+                    ),
                 )
 
             logger.info(f"Operator {operator_name} started monitoring")
             return True
-        except Exception as e:
+        except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(f"Failed to start monitoring: {e}")
             return False
 
@@ -77,13 +81,18 @@ class MonitoringService:
             # 记录操作日志
             database = get_database()
             async with database.get_db_session() as session:
-                await log_operation(
-                    session, operator_id, operator_name, "stop_monitor", None
+                await log_operation(  # pylint: disable=duplicate-code
+                    session,
+                    OperationParams(
+                        operator_id=operator_id,
+                        operator_name=operator_name,
+                        action="stop_monitor",
+                    ),
                 )
 
             logger.info(f"Operator {operator_name} stopped monitoring")
             return True
-        except Exception as e:
+        except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(f"Failed to stop monitoring: {e}")
             return False
 
