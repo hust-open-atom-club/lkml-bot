@@ -1,9 +1,8 @@
 """LKML领域模型"""
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Boolean, Text, DateTime, JSON
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import relationship
 
 Base = declarative_base()
 
@@ -25,10 +24,6 @@ class Subsystem(Base):  # pylint: disable=too-few-public-methods
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
 
-    # 关系
-    email_messages = relationship("EmailMessage", back_populates="subsystem")
-    feed_messages = relationship("FeedMessage", back_populates="subsystem")
-
 
 class EmailMessage(Base):  # pylint: disable=too-few-public-methods
     """邮件消息模型
@@ -40,7 +35,7 @@ class EmailMessage(Base):  # pylint: disable=too-few-public-methods
     __tablename__ = "email_messages"
 
     id = Column(Integer, primary_key=True, index=True)
-    subsystem_id = Column(Integer, ForeignKey("subsystems.id"), nullable=False)
+    subsystem_name = Column(String(100), nullable=False, index=True)
     message_id = Column(
         String(500), unique=True, nullable=True, index=True
     )  # 消息唯一标识
@@ -55,11 +50,8 @@ class EmailMessage(Base):  # pylint: disable=too-few-public-methods
     message_id_header = Column(String(500), nullable=True, index=True)
     in_reply_to_header = Column(String(500), nullable=True, index=True)
 
-    # 关系
-    subsystem = relationship("Subsystem", back_populates="email_messages")
 
-
-class FeedMessage(Base):  # pylint: disable=too-few-public-methods
+class FeedMessageModel(Base):  # pylint: disable=too-few-public-methods
     """Feed 消息模型
 
     存储邮件消息的分类信息和 PATCH 信息，用于快速查询和过滤。
@@ -69,9 +61,7 @@ class FeedMessage(Base):  # pylint: disable=too-few-public-methods
     __tablename__ = "feed_messages"
 
     id = Column(Integer, primary_key=True, index=True)
-    subsystem_id = Column(
-        Integer, ForeignKey("subsystems.id"), nullable=False, index=True
-    )
+    subsystem_name = Column(String(100), nullable=False, index=True)
     message_id = Column(
         String(500), unique=True, nullable=True, index=True
     )  # 消息唯一标识（兼容 EmailMessage）
@@ -121,9 +111,6 @@ class FeedMessage(Base):  # pylint: disable=too-few-public-methods
         DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
     )
 
-    # 关系
-    subsystem = relationship("Subsystem", back_populates="feed_messages")
-
 
 class OperationLog(Base):  # pylint: disable=too-few-public-methods
     """操作日志模型
@@ -148,7 +135,7 @@ class OperationLog(Base):  # pylint: disable=too-few-public-methods
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
-class PatchCard(Base):  # pylint: disable=too-few-public-methods
+class PatchCardModel(Base):  # pylint: disable=too-few-public-methods
     """PATCH 卡片模型
 
     存储 PATCH 邮件的卡片信息，用于跟踪哪些 PATCH 已建立 Thread。
@@ -176,19 +163,18 @@ class PatchCard(Base):  # pylint: disable=too-few-public-methods
         String(500), nullable=True, index=True
     )  # 系列 PATCH 的根 message_id（通常是 0/n 的 message_id）
     patch_version = Column(String(20), nullable=True)  # PATCH 版本（如 v5）
-    patch_index = Column(Integer, nullable=True, default=0)  # PATCH 序号（如 1/4 中的 1），默认 0
-    patch_total = Column(Integer, nullable=True, default=0)  # PATCH 总数（如 1/4 中的 4），默认 0
+    patch_index = Column(
+        Integer, nullable=True, default=0
+    )  # PATCH 序号（如 1/4 中的 1），默认 0
+    patch_total = Column(
+        Integer, nullable=True, default=0
+    )  # PATCH 总数（如 1/4 中的 4），默认 0
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     expires_at = Column(DateTime, nullable=False, index=True)  # 过期时间（24小时后）
 
-    # 关系
-    patch_thread = relationship(
-        "PatchThread", back_populates="patch_card", uselist=False
-    )
 
-
-class PatchThread(Base):  # pylint: disable=too-few-public-methods
+class PatchThreadModel(Base):  # pylint: disable=too-few-public-methods
     """PATCH Thread 模型
 
     存储 PATCH 对应的 Thread 信息，用于将 REPLY 消息发送到对应的 Thread。
@@ -198,9 +184,9 @@ class PatchThread(Base):  # pylint: disable=too-few-public-methods
     __tablename__ = "patch_threads"
 
     id = Column(Integer, primary_key=True, index=True)
-    patch_card_id = Column(
-        Integer, ForeignKey("patch_cards.id"), nullable=False, unique=True
-    )
+    patch_card_message_id_header = Column(
+        String(500), nullable=False, unique=True, index=True
+    )  # PATCH 卡片的 message_id_header（用于关联，不使用外键）
     thread_id = Column(
         String(100), unique=True, nullable=False, index=True
     )  # Discord Thread ID
@@ -209,8 +195,8 @@ class PatchThread(Base):  # pylint: disable=too-few-public-methods
     overview_message_id = Column(
         String(100), nullable=True, index=True
     )  # Thread Overview 消息 ID（用于更新）
+    sub_patch_messages = Column(
+        JSON, nullable=True
+    )  # 子 PATCH 消息映射 {patch_index: message_id}
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     archived_at = Column(DateTime, nullable=True)  # Thread 归档时间
-
-    # 关系
-    patch_card = relationship("PatchCard", back_populates="patch_thread")
