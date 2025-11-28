@@ -17,10 +17,15 @@ class MessageSender:  # pylint: disable=too-few-public-methods
     核心职责是协调多个适配器发送消息，方法数量是合理的。
     """
 
-    def __init__(self):
-        """初始化消息发送器"""
+    def __init__(self, database=None):
+        """初始化消息发送器
+
+        Args:
+            database: 数据库实例（可选）
+        """
         self.renderer = DiscordRenderer()
-        self.discord_adapter = DiscordAdapter()
+        self.discord_adapter = DiscordAdapter(database=database)
+        self.database = database
         # 可以在这里添加更多适配器
 
     async def send_subsystem_update(
@@ -60,12 +65,27 @@ class MessageSender:  # pylint: disable=too-few-public-methods
                 )
                 # TODO: 向每个用户发送消息
 
-        except Exception as e:
+        except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(
                 f"Failed to send subsystem update for {subsystem}: {e}", exc_info=True
             )
             raise
 
 
-# 全局消息发送器实例
-message_sender = MessageSender()
+# 全局消息发送器实例（延迟初始化，需要在有 database 时重新创建）
+message_sender = None
+
+
+def get_message_sender(database=None) -> MessageSender:
+    """获取消息发送器实例
+
+    Args:
+        database: 数据库实例（可选）
+
+    Returns:
+        消息发送器实例
+    """
+    global message_sender  # pylint: disable=global-statement
+    if message_sender is None or (database and message_sender.database is None):
+        message_sender = MessageSender(database=database)
+    return message_sender

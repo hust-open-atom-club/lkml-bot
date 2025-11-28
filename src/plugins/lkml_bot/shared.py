@@ -14,6 +14,8 @@ from nonebot.exception import FinishedException
 from nonebot.log import logger
 from nonebot.plugin import PluginMetadata
 
+from .config import get_config
+
 
 __plugin_meta__ = PluginMetadata(
     name="LKML Bot",
@@ -113,13 +115,27 @@ def extract_command(text: str, command: str) -> Optional[str]:
 
     返回:
         如果找到命令，返回从命令开始的文本，否则返回 None
+
+    注意：
+        命令必须是完整的词，即命令后面必须是空格、字符串结尾或标点符号，
+        而不能是其他字符（避免 /subscribe 误匹配 /watch）
     """
     text = text.strip()
+
+    # 检查是否以命令开头
     if text.startswith(command):
-        return text
+        # 确保命令后面是空格或字符串结尾（完整匹配）
+        if len(text) == len(command) or text[len(command)] in (" ", "\n", "\t"):
+            return text
+
+    # 在文本中查找命令
     idx = text.find(command)
     if idx >= 0:
-        return text[idx:].strip()
+        # 确保命令后面是空格或字符串结尾
+        end_idx = idx + len(command)
+        if end_idx == len(text) or text[end_idx] in (" ", "\n", "\t"):
+            return text[idx:].strip()
+
     return None
 
 
@@ -151,7 +167,11 @@ def get_user_info(event: Event) -> Tuple[str, str]:
         return (user_id, user_name)
     except FinishedException:
         raise  # 重新抛出 FinishedException，这是正常流程
-    except Exception as e:
+    except (
+        ValueError,
+        AttributeError,
+        KeyError,
+    ) as e:  # pylint: disable=try-except-raise
         logger.error(f"Failed to get user info: {e}")
         raise
 
@@ -179,5 +199,57 @@ async def get_user_info_or_finish(event: Event, matcher) -> Tuple[str, str]:
         raise FinishedException from exc
 
 
+# 获取 Bot 提及名称的辅助函数
+def get_bot_mention_name() -> str:
+    """获取 Bot 的提及名称
+
+    Returns:
+        Bot 的提及名称（如 @lkml-bot）
+    """
+    return get_config().bot_mention_name
+
+
 # 基础提示（头部）
-BASE_HELP_HEADER = "用法: @lkml-bot /<子命令> [参数...]\n"
+def get_base_help_header() -> str:
+    """获取基础帮助头部信息
+
+    Returns:
+        帮助头部字符串
+    """
+    return f"用法: {get_bot_mention_name()} /<子命令> [参数...]\n"
+
+
+# 数据库单例
+_database = None
+
+
+def set_database(database):
+    """设置数据库实例
+
+    Args:
+        database: 数据库实例
+    """
+    global _database  # pylint: disable=global-statement
+    _database = database
+
+
+def get_database():
+    """获取数据库实例
+
+    Returns:
+        数据库实例，如果未初始化则返回 None
+    """
+    return _database
+
+
+def get_session_provider():
+    """获取 SessionProvider 实例
+
+    Returns:
+        SessionProvider 实例
+    """
+    # Import here to avoid circular import
+    # pylint: disable=import-outside-toplevel,redefined-outer-name
+    from lkml.db.database import get_session_provider
+
+    return get_session_provider()

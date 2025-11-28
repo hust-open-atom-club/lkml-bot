@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 from ..config import get_config
 from ..db.database import get_database
-from ..db.models import EmailMessage, OperationLog, Subsystem
+from ..db.models import FeedMessageModel, OperationLog, Subsystem
 
 
 class QueryService:
@@ -34,13 +34,23 @@ class QueryService:
             database = get_database()
             async with database.get_db_session() as session:
                 # 构建查询条件
-                query = select(EmailMessage).join(Subsystem).where(Subsystem.subscribed)
+                # 先获取已订阅的子系统名称列表
+                result = await session.execute(
+                    select(Subsystem.name).where(Subsystem.subscribed)
+                )
+                subscribed_subsystem_names = [row[0] for row in result.fetchall()]
+
+                query = select(FeedMessageModel).where(
+                    FeedMessageModel.subsystem_name.in_(subscribed_subsystem_names)
+                )
 
                 if subsystem_name:
-                    query = query.where(Subsystem.name == subsystem_name)
+                    query = query.where(
+                        FeedMessageModel.subsystem_name == subsystem_name
+                    )
 
                 max_count = config.max_news_count
-                query = query.order_by(EmailMessage.received_at.desc()).limit(
+                query = query.order_by(FeedMessageModel.received_at.desc()).limit(
                     min(count, max_count)
                 )
 
@@ -51,9 +61,9 @@ class QueryService:
                     {
                         "id": msg.id,
                         "subject": msg.subject,
-                        "sender": msg.sender,
-                        "sender_email": msg.sender_email,
-                        "subsystem": msg.subsystem.name,
+                        "sender": msg.author,
+                        "sender_email": msg.author_email,
+                        "subsystem": msg.subsystem_name,
                         "received_at": msg.received_at.isoformat(),
                         "content": (
                             msg.content[:200] + "..."

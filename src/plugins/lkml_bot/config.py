@@ -11,6 +11,14 @@ class PluginConfig(BaseLKMLConfig):
 
     # Discord 配置（机器人特定）
     discord_webhook_url: str = ""
+    discord_bot_token: str = ""  # Discord Bot Token（用于 Thread 操作）
+    platform_channel_id: str = ""  # Discord 频道 ID（用于发送消息和创建 Thread）
+    bot_mention_name: str = "@lkml-bot"  # Bot 在消息中的提及名称
+
+    # Thread 相关配置
+    thread_subscription_timeout_hours: int = 24  # 订阅卡片过期时间（小时）
+    thread_pool_max_size: int = 50  # Thread 池最大大小
+    card_builder_interval_minutes: int = 5  # 卡片构建间隔（分钟）
 
     @classmethod
     def from_env(cls, database_url=None) -> "PluginConfig":
@@ -24,8 +32,20 @@ class PluginConfig(BaseLKMLConfig):
         # 先创建基础配置（已经处理了所有基础配置的环境变量和默认值）
         base_config = BaseLKMLConfig.from_env()
 
-        # 获取 Discord webhook URL（从环境变量读取，可在 .env 文件中配置）
+        # 获取 Discord 相关配置
         discord_webhook_url = os.getenv("LKML_DISCORD_WEBHOOK_URL", "")
+        discord_bot_token = os.getenv("LKML_DISCORD_BOT_TOKEN", "")
+        platform_channel_id = os.getenv("LKML_DISCORD_CHANNEL_ID", "")
+        bot_mention_name = os.getenv("LKML_BOT_MENTION_NAME", "@lkml-bot")
+
+        # Thread 相关配置
+        thread_subscription_timeout_hours = int(
+            os.getenv("LKML_THREAD_SUBSCRIPTION_TIMEOUT_HOURS", "24")
+        )
+        thread_pool_max_size = int(os.getenv("LKML_THREAD_POOL_MAX_SIZE", "50"))
+        card_builder_interval_minutes = int(
+            os.getenv("LKML_CARD_BUILDER_INTERVAL_MINUTES", "5")
+        )
 
         return cls(
             database_url=base_config.database_url,
@@ -34,6 +54,12 @@ class PluginConfig(BaseLKMLConfig):
             monitoring_interval=base_config.monitoring_interval,
             last_update_dt_override_iso=base_config.last_update_dt_override_iso,
             discord_webhook_url=discord_webhook_url,
+            discord_bot_token=discord_bot_token,
+            platform_channel_id=platform_channel_id,
+            bot_mention_name=bot_mention_name,
+            thread_subscription_timeout_hours=thread_subscription_timeout_hours,
+            thread_pool_max_size=thread_pool_max_size,
+            card_builder_interval_minutes=card_builder_interval_minutes,
         )
 
 
