@@ -67,7 +67,7 @@ class EmailMessageRepository:
             "sender_email": data.sender_email,
             "content": data.content,
             "url": data.url,
-            "subsystem_id": data.subsystem.id,
+            "subsystem_name": data.subsystem.name,
             "received_at": data.received_at,
             "message_id_header": data.message_id_header,
             "in_reply_to_header": data.in_reply_to_header,
