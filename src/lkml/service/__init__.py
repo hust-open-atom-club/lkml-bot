@@ -27,7 +27,6 @@ from .subsystem_service import SubsystemService, subsystem_service
 from .thread_service import (
     ThreadService,
     parse_reply_time,
-    find_actual_patch_for_reply,
 )
 from .feed_message_service import FeedMessageService
 
@@ -71,5 +70,4 @@ __all__ = [
     "ThreadOverviewData",
     # 回复处理辅助函数
     "parse_reply_time",
-    "find_actual_patch_for_reply",
 ]

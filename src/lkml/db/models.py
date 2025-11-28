@@ -25,37 +25,10 @@ class Subsystem(Base):  # pylint: disable=too-few-public-methods
     )
 
 
-class EmailMessage(Base):  # pylint: disable=too-few-public-methods
-    """邮件消息模型
-
-    存储从邮件列表抓取的单封邮件信息。
-    这是 SQLAlchemy ORM 模型，主要作为数据容器，不需要太多公共方法。
-    """
-
-    __tablename__ = "email_messages"
-
-    id = Column(Integer, primary_key=True, index=True)
-    subsystem_name = Column(String(100), nullable=False, index=True)
-    message_id = Column(
-        String(500), unique=True, nullable=True, index=True
-    )  # 消息唯一标识
-    subject = Column(String(500), nullable=False)
-    sender = Column(String(200), nullable=False)
-    sender_email = Column(String(200), nullable=False)
-    content = Column(Text, nullable=True)
-    url = Column(String(1000), nullable=True)  # 消息链接
-    received_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
-
-    # 原始邮件头部关键信息（若可从 feed 获取）
-    message_id_header = Column(String(500), nullable=True, index=True)
-    in_reply_to_header = Column(String(500), nullable=True, index=True)
-
-
 class FeedMessageModel(Base):  # pylint: disable=too-few-public-methods
     """Feed 消息模型
 
     存储邮件消息的分类信息和 PATCH 信息，用于快速查询和过滤。
-    通过 message_id_header 关联到 EmailMessage。
     """
 
     __tablename__ = "feed_messages"
@@ -64,7 +37,7 @@ class FeedMessageModel(Base):  # pylint: disable=too-few-public-methods
     subsystem_name = Column(String(100), nullable=False, index=True)
     message_id = Column(
         String(500), unique=True, nullable=True, index=True
-    )  # 消息唯一标识（兼容 EmailMessage）
+    )  # 消息唯一标识
     message_id_header = Column(
         String(500), nullable=False, unique=True, index=True
     )  # Message-ID Header，用于快速查找

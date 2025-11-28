@@ -11,10 +11,11 @@
 """
 
 import sys
+import logging
 from pathlib import Path
 
 from nonebot import get_driver
-from nonebot.log import logger
+from nonebot.log import logger, LoguruHandler
 
 # 1) 环境与路径
 # 加载 .env 文件（如果存在）
@@ -37,7 +38,7 @@ if str(src_path) not in sys.path:
 # 注意：这些导入在 sys.path 修改之后，是必要的，因此使用 pylint 注释禁用相关警告
 # 第一方导入（必须在本地导入之前）
 # pylint: disable=wrong-import-position
-from lkml.config import set_config, get_config  # noqa: E402
+from lkml.config import set_config  # noqa: E402
 from lkml.db import set_database, LKMLDatabase, Base  # noqa: E402
 from lkml.feed.feed import FeedProcessor  # noqa: E402
 from lkml.feed.feed_monitor import LKMLFeedMonitor  # noqa: E402
@@ -140,7 +141,28 @@ __all__ = [
 ]
 
 
-# 6) 机器人生命周期：启动/停止钩子
+# 6) 配置标准 Python logging 转发到 NoneBot 的 loguru
+# 在插件加载时配置，确保 NoneBot 已初始化
+def _setup_logging_bridge():
+    """配置标准 Python logging 转发到 loguru"""
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    # 避免重复添加 handler
+    if not any(isinstance(h, LoguruHandler) for h in root_logger.handlers):
+        root_logger.addHandler(LoguruHandler())
+        logger.info("✓ Configured LoguruHandler for standard Python logging")
+
+        # 测试日志桥接是否工作
+        test_logger = logging.getLogger("lkml.service.thread_service")
+        test_logger.info("✓ Logging bridge test: standard logging -> loguru is working")
+    else:
+        logger.debug("LoguruHandler already configured")
+
+
+# 立即配置日志桥接
+_setup_logging_bridge()
+
+# 7) 机器人生命周期：启动/停止钩子
 driver = get_driver()
 
 

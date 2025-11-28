@@ -33,7 +33,7 @@ def parse_reply_time(reply) -> Optional[datetime]:
     """解析回复时间
 
     Args:
-        reply: EmailMessage 对象
+        reply: FeedMessage 对象
 
     Returns:
         datetime 对象，如果解析失败则返回 None
@@ -205,47 +205,6 @@ async def build_reply_hierarchy_internal(
         )
 
     return ReplyHierarchy(reply_map=reply_map, root_replies=root_replies)
-
-
-async def find_actual_patch_for_reply(
-    session, feed_message, max_depth: int = 5
-) -> Optional[object]:
-    """查找回复实际对应的 PATCH
-
-    递归查找 in_reply_to 链，直到找到实际的 PATCH（不是 cover letter）
-
-    Args:
-        session: 数据库会话
-        feed_message: Feed 消息对象
-        max_depth: 最大递归深度
-
-    Returns:
-        PATCH 订阅对象，如果不存在则返回 None
-    """
-    if max_depth <= 0 or not feed_message.in_reply_to_header:
-        return None
-
-    in_reply_to = feed_message.in_reply_to_header
-
-    # 创建 Repository 实例（轻量、无状态，可随时 new）
-    patch_card_repo = PatchCardRepository(session)
-    feed_message_repo = FeedMessageRepository(session)
-
-    # 查找这个 message_id 对应的 PATCH
-    patch_card = await patch_card_repo.find_by_message_id_header(in_reply_to)
-    if patch_card:
-        # 如果找到的 PATCH 不是 cover letter，返回它
-        if patch_card.patch_index != 0:
-            return patch_card
-        # 如果是 cover letter，返回 None（表示这个回复是针对 cover letter 的）
-        return None
-
-    # 如果这个 message_id 不是 PATCH，查找对应的 Feed 消息，继续查找它的 in_reply_to
-    feed_msg = await feed_message_repo.find_by_message_id_header(in_reply_to)
-    if feed_msg and feed_msg.in_reply_to_header:
-        return await find_actual_patch_for_reply(session, feed_msg, max_depth - 1)
-
-    return None
 
 
 # ========== ThreadService 类 ==========
@@ -478,54 +437,6 @@ class ThreadService:
             session, patch_replies, patch_message_id
         )
 
-    async def find_all_replies_to_patch(
-        self, patch_message_id: str, max_depth: int = 10
-    ) -> List[FeedMessage]:
-        """查找 PATCH 的所有回复（包括直接回复和间接回复）
-
-        Args:
-            patch_message_id: PATCH 的 message_id
-            max_depth: 最大递归深度
-
-        Returns:
-            所有回复列表
-        """
-        try:
-            repo_replies = await self.feed_message_repo.find_replies_to(
-                patch_message_id, limit=max_depth * 10
-            )
-            # 转换为 Service 层的 FeedMessage
-            return [
-                self._repo_data_to_service_feed_message(reply) for reply in repo_replies
-            ]
-        except (RuntimeError, ValueError, AttributeError) as e:
-            logger.error(f"Failed to find all replies to patch: {e}", exc_info=True)
-            return []
-
-    async def find_replies_to_sub_patch(
-        self, sub_patch_message_id: str, max_depth: int = 10
-    ) -> List[FeedMessage]:
-        """查找特定子 PATCH 的所有回复
-
-        Args:
-            sub_patch_message_id: 子 PATCH 的 message_id
-            max_depth: 最大递归深度
-
-        Returns:
-            该子 PATCH 的回复列表
-        """
-        try:
-            repo_replies = await self.feed_message_repo.find_replies_to(
-                sub_patch_message_id, limit=max_depth * 10
-            )
-            # 转换为 Service 层的 FeedMessage
-            return [
-                self._repo_data_to_service_feed_message(reply) for reply in repo_replies
-            ]
-        except (RuntimeError, ValueError, AttributeError) as e:
-            logger.error(f"Failed to find replies to sub-patch: {e}", exc_info=True)
-            return []
-
     async def update_sub_patch_messages(
         self, thread_id: str, sub_patch_messages: dict
     ) -> bool:
@@ -542,112 +453,111 @@ class ThreadService:
             thread_id, sub_patch_messages
         )
 
-    def _filter_replies_for_patch(
-        self, all_replies: List[FeedMessage], patch_message_id: str
-    ) -> List[FeedMessage]:
-        """筛选某个 PATCH 的所有回复（包括直接和间接回复）
+    async def _prepare_single_patch_overview(self, patch):
+        """为单个 Patch 准备 overview 数据
 
         Args:
-            all_replies: 所有回复列表
-            patch_message_id: PATCH 的 message_id
+            patch: Patch 对象（SeriesPatchInfo）
 
         Returns:
-            该 PATCH 的所有回复列表（包括直接和间接回复）
-        """
-        patch_replies = []
-        patch_message_ids = [patch_message_id]
-
-        # 首先找到所有直接回复该 PATCH 的回复
-        for reply in all_replies:
-            if not reply.in_reply_to_header:
-                continue
-
-            # 提取 in_reply_to 中的 message_id
-            in_reply_to = _extract_message_id_from_header(reply.in_reply_to_header)
-            if not in_reply_to:
-                continue
-
-            # 检查是否是直接回复该 PATCH
-            if patch_message_id in in_reply_to or in_reply_to == patch_message_id:
-                if reply not in patch_replies:
-                    patch_replies.append(reply)
-                    patch_message_ids.append(reply.message_id_header)
-
-        # 然后找到所有间接回复（回复的回复）
-        # 递归查找所有回复该 PATCH 或其回复的消息
-        changed = True
-        while changed:
-            changed = False
-            for reply in all_replies:
-                if reply in patch_replies:
-                    continue
-
-                if not reply.in_reply_to_header:
-                    continue
-
-                in_reply_to = _extract_message_id_from_header(reply.in_reply_to_header)
-                if not in_reply_to:
-                    continue
-
-                # 检查是否是回复该 PATCH 或其任何回复
-                for msg_id in patch_message_ids:
-                    if msg_id in in_reply_to or in_reply_to == msg_id:
-                        if reply not in patch_replies:
-                            patch_replies.append(reply)
-                            patch_message_ids.append(reply.message_id_header)
-                            changed = True
-                        break
-
-        return patch_replies
-
-    async def prepare_sub_patch_overview_data(
-        self, patch: "SeriesPatchInfo", all_replies: List[FeedMessage]
-    ) -> "SubPatchOverviewData":
-        """为单个子 PATCH 准备独立的 Overview 数据
-
-        Args:
-            patch: 子 PATCH 信息
-            all_replies: 所有回复列表（从整个系列中筛选）
-
-        Returns:
-            SubPatchOverviewData，包含该子 PATCH 的完整数据
+            SubPatchOverviewData 对象，失败返回 None
         """
         from .types import SubPatchOverviewData
 
-        # 1. 筛选该子 PATCH 的所有回复
-        patch_replies = self._filter_replies_for_patch(all_replies, patch.message_id)
+        try:
+            patch_replies = await self.get_all_replies_for_patch(patch.message_id)
+            patch_reply_hierarchy = await self.build_reply_hierarchy(
+                patch_replies, patch.message_id
+            )
 
-        # 2. 构建该子 PATCH 的回复层级
-        patch_reply_hierarchy = await self.build_reply_hierarchy(
-            patch_replies, patch.message_id
-        )
+            return SubPatchOverviewData(
+                patch=patch,
+                replies=patch_replies,
+                reply_hierarchy=patch_reply_hierarchy,
+            )
+        except (RuntimeError, ValueError, AttributeError) as e:
+            logger.error(
+                f"Failed to prepare single patch overview: {e}",
+                exc_info=True,
+            )
+            return None
 
-        return SubPatchOverviewData(
-            patch=patch,
-            replies=patch_replies,
-            reply_hierarchy=patch_reply_hierarchy,
-        )
+    async def get_all_replies_for_patch(
+        self, patch_message_id: str
+    ) -> List[FeedMessage]:
+        """获取某个 Patch 的所有 REPLY（包括 REPLY 的 REPLY）
+
+        这个方法会递归查找所有直接和间接回复该 Patch 的消息。
+
+        Args:
+            patch_message_id: Patch 的 message_id_header
+
+        Returns:
+            该 Patch 的所有 REPLY 列表（包括 REPLY 的 REPLY）
+        """
+        try:
+            # 使用递归方式查找所有回复（包括间接回复）
+            all_replies = []
+            message_ids_to_check = [patch_message_id]
+            checked_message_ids = set()
+            max_iterations = 20  # 防止无限循环
+
+            iteration = 0
+            while message_ids_to_check and iteration < max_iterations:
+                iteration += 1
+                current_message_id = message_ids_to_check.pop(0)
+
+                # 避免重复检查
+                if current_message_id in checked_message_ids:
+                    continue
+                checked_message_ids.add(current_message_id)
+
+                # 查找直接回复当前消息的所有 REPLY
+                direct_replies = await self.feed_message_repo.find_replies_to(
+                    current_message_id, limit=100
+                )
+
+                # 转换为 Service 层的 FeedMessage
+                for reply_data in direct_replies:
+                    reply = self._repo_data_to_service_feed_message(reply_data)
+
+                    # 如果这个 REPLY 还没有被添加到列表中，添加它
+                    if not any(
+                        r.message_id_header == reply.message_id_header
+                        for r in all_replies
+                    ):
+                        all_replies.append(reply)
+                        # 将这个 REPLY 的 message_id 加入待检查列表，以便查找回复它的 REPLY
+                        if reply.message_id_header not in checked_message_ids:
+                            message_ids_to_check.append(reply.message_id_header)
+
+            return all_replies
+        except (RuntimeError, ValueError, AttributeError) as e:
+            logger.error(
+                f"Failed to get all replies for patch {patch_message_id}: {e}",
+                exc_info=True,
+            )
+            return []
 
     async def prepare_thread_overview_data(
         self, message_id_header: str
     ) -> Optional[ThreadOverviewData]:
         """准备 Thread Overview 渲染数据（供 Plugins 层使用）
 
-        这个方法做所有的业务逻辑：
-        - 查询 PatchCard（包含 series_patches）
-        - 查询所有 replies
-        - 构建 reply hierarchy
-        - 为每个子 PATCH 准备独立的 overview 数据
-        - 返回完整的渲染数据
+        统一处理单 Patch 和 Series Patch：
+        - 单 Patch：为该 Patch 准备所有 REPLY 数据（包括 REPLY 的 REPLY）
+        - Series Patch：以子 Patch 为单位，每个子 Patch 和单 Patch 的逻辑一致
 
         Args:
-            message_id_header: PATCH message_id_header
+            message_id_header: PATCH message_id_header（Cover Letter 或单 Patch）
 
         Returns:
             ThreadOverviewData，如果不存在返回 None
         """
         from ..db.database import get_patch_card_service
-        from .types import ThreadOverviewData
+        from .helpers import build_single_patch_info
+
+        # ThreadOverviewData 已在模块顶部导入
 
         try:
             # 1. 获取 PatchCard（包含 series_patches）
@@ -660,42 +570,34 @@ class ThreadService:
                 logger.warning(f"PatchCard not found: {message_id_header}")
                 return None
 
-            # 2. 查询所有 replies（整个系列的）
-            replies = await self.find_all_replies_to_patch(message_id_header)
-
-            # 3. 构建整体 reply hierarchy（基于 cover letter）
-            reply_hierarchy = await self.build_reply_hierarchy(
-                replies, message_id_header
-            )
-
-            # 4. 为每个子 PATCH 准备独立的 overview 数据
-            sub_patch_overviews = None
+            # 2. 确定要处理的 Patch 列表
             if patch_card.is_series_patch and patch_card.series_patches:
-                # 系列 PATCH：为每个子 PATCH 准备独立数据
-                sub_patch_overviews = []
-                # 过滤掉 Cover Letter (index=0)
-                patches_to_process = [
-                    p for p in patch_card.series_patches if p.patch_index != 0
-                ]
-                for patch in patches_to_process:
-                    sub_overview = await self.prepare_sub_patch_overview_data(
-                        patch, replies
-                    )
-                    sub_patch_overviews.append(sub_overview)
+                # Series Patch：处理所有子 Patch
+                patches_to_process = list(patch_card.series_patches)
             else:
-                # 单 PATCH：也为它准备独立数据
-                from .helpers import build_single_patch_info
-
+                # 单 Patch：构建 SeriesPatchInfo 对象
                 single_patch = build_single_patch_info(patch_card)
-                sub_overview = await self.prepare_sub_patch_overview_data(
-                    single_patch, replies
-                )
-                sub_patch_overviews = [sub_overview]
+                patches_to_process = [single_patch]
 
+            if not patches_to_process:
+                logger.warning(
+                    f"No patches to process for message_id_header: {message_id_header}"
+                )
+                return None
+
+            # 3. 为每个 Patch 准备独立的 overview 数据
+            sub_patch_overviews = []
+            for patch in patches_to_process:
+                overview = await self._prepare_single_patch_overview(patch)
+                if overview:
+                    sub_patch_overviews.append(overview)
+
+            # 4. 构建 ThreadOverviewData
+            # 注意：replies 和 reply_hierarchy 字段保留用于兼容，但实际使用 sub_patch_overviews
             return ThreadOverviewData(
                 patch_card=patch_card,
-                replies=replies,
-                reply_hierarchy=reply_hierarchy,
+                replies=[],  # 不再使用整体 replies
+                reply_hierarchy=None,  # 不再使用整体 reply_hierarchy
                 sub_patch_overviews=sub_patch_overviews,
             )
 

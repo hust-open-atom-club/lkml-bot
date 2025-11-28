@@ -62,7 +62,6 @@ class ThreadOverviewRenderer:
         """
         try:
             sub_patch_messages = {}
-            patch_card = overview_data.patch_card
 
             # 使用 service 层准备好的 sub_patch_overviews
             if overview_data.sub_patch_overviews:
@@ -187,10 +186,11 @@ class ThreadOverviewRenderer:
         indent = "\t" * level
 
         # 格式化当前回复：` 时间 作者 (邮箱)
+        subject = reply.subject.split("] ", 1)[0] + "]"
         reply_time = reply.received_at.strftime("%Y-%m-%d %H:%M")
-        author = reply.author if reply.author else "Unknown"
+        author = reply.author.split(" (", 1)[0] if reply.author else "Unknown"
 
-        lines.append(f"{indent}[` {reply_time} {author}]({reply.url})")
+        lines.append(f"{indent}\\` {reply_time} [{subject}]({reply.url}) {author}")
 
         # 递归处理子回复
         message_id = reply.message_id_header

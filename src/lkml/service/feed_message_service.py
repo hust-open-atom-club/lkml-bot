@@ -16,8 +16,7 @@ from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.repo import FeedMessageData
-from .types import FeedMessage as ServiceFeedMessage
-from .types import PatchCard, PatchThread
+from .types import FeedMessage as ServiceFeedMessage, PatchCard, PatchThread
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +254,7 @@ class FeedMessageService:
         series_patches,
     ):
         """构建临时 PatchCard 对象用于渲染"""
-        from .types import PatchCard
+        # PatchCard 已在模块顶部导入，不需要重新导入
 
         return PatchCard(
             message_id_header=feed_message.message_id_header,
@@ -323,8 +322,9 @@ class FeedMessageService:
             return
 
         # 更新 Thread：如果是多消息模式，只更新对应的子 PATCH 消息
+        # 传入 session 以确保能查询到新保存的 REPLY（还在同一事务中）
         await self._update_thread_with_reply(
-            thread, patch_card, feed_message.in_reply_to_header
+            session, thread, patch_card, feed_message.in_reply_to_header
         )
 
     async def _find_patch_card_and_thread_for_reply(
@@ -376,14 +376,18 @@ class FeedMessageService:
     async def _find_patch_card_for_reply(
         self, session, patch_card_service, feed_message
     ):
-        """查找回复对应的 PATCH 卡片"""
+        """查找回复对应的 PATCH 卡片
+
+        查找逻辑：
+        1. 直接匹配 in_reply_to_header（可能是 Cover Letter 或单 PATCH）
+        2. 如果没找到，可能是回复子 PATCH 的情况，通过子 PATCH 的 series_message_id 查找 Cover Letter
+        """
         # 1. 直接匹配 in_reply_to_header（可能是 Cover Letter 或单 PATCH）
         patch_card = await patch_card_service.find_by_message_id_header(
             feed_message.in_reply_to_header
         )
 
         # 2. 如果没找到，可能是回复子 PATCH 的情况
-        #    先查找子 PATCH 的 feed_message，获取它的 series_message_id
         if not patch_card:
             from ..db.repo import FeedMessageRepository
 
@@ -394,14 +398,17 @@ class FeedMessageService:
 
             # 如果找到了子 PATCH 的 feed_message，通过它的 series_message_id 查找 Cover Letter
             if sub_patch_feed_message and sub_patch_feed_message.series_message_id:
-                patch_card = await patch_card_service.find_by_series_message_id(
+                # 使用 find_series_patch_card 而不是 find_by_series_message_id
+                # 因为 find_by_series_message_id 要求 has_thread=True，可能导致找不到
+                patch_card = await patch_card_service.find_series_patch_card(
                     sub_patch_feed_message.series_message_id
                 )
-                logger.debug(
-                    f"Found Cover Letter via sub-patch series_message_id: "
-                    f"in_reply_to={feed_message.in_reply_to_header}, "
-                    f"series_message_id={sub_patch_feed_message.series_message_id}"
-                )
+                if patch_card:
+                    logger.debug(
+                        f"Found Cover Letter via sub-patch series_message_id: "
+                        f"in_reply_to={feed_message.in_reply_to_header}, "
+                        f"series_message_id={sub_patch_feed_message.series_message_id}"
+                    )
 
         if not patch_card:
             logger.debug(
@@ -411,7 +418,9 @@ class FeedMessageService:
 
         return patch_card
 
-    async def _send_thread_update_notification(self, thread:PatchThread, patch_card:PatchCard):
+    async def _send_thread_update_notification(
+        self, thread: PatchThread, patch_card: PatchCard
+    ):
         """发送 Thread 更新通知到频道
 
         Args:
@@ -421,7 +430,9 @@ class FeedMessageService:
         try:
             # 检查是否有可用的渲染器配置
             if not self.thread_overview_renderer:
-                logger.debug("Thread overview renderer not configured, skipping notification")
+                logger.debug(
+                    "Thread overview renderer not configured, skipping notification"
+                )
                 return
 
             # 获取频道 ID
@@ -432,7 +443,9 @@ class FeedMessageService:
                     self.thread_overview_renderer, "config"
                 ):
                     channel_id = getattr(
-                        self.thread_overview_renderer.config, "platform_channel_id", None
+                        self.thread_overview_renderer.config,
+                        "platform_channel_id",
+                        None,
                     )
 
             if not channel_id:
@@ -486,11 +499,19 @@ class FeedMessageService:
             )
 
     async def _update_thread_with_reply(
-        self, thread:PatchThread, patch_card:PatchCard, in_reply_to_header: str
+        self,
+        session: AsyncSession,
+        thread: PatchThread,
+        patch_card: PatchCard,
+        in_reply_to_header: str,
     ):
         """当 Reply 到达时，更新 Thread
 
+        找到 REPLY 对应的 Patch（单 Patch 或 Series Patch 中的某个子 Patch），
+        更新该 Patch 的 REPLY 数据。
+
         Args:
+            session: 数据库会话（用于查询，确保能查询到新保存的 REPLY）
             thread: Thread 对象
             patch_card: PATCH 卡片对象
             in_reply_to_header: Reply 的 in_reply_to 头部
@@ -500,20 +521,54 @@ class FeedMessageService:
             return
 
         try:
-            update_success = False
+            # 1. 找到 REPLY 对应的 Patch
+            target_patch, target_patch_index = await self._find_target_patch_for_reply(
+                patch_card, in_reply_to_header
+            )
 
-            # 系列 PATCH：更新对应的子 PATCH 消息
-            if patch_card.is_series_patch:
-                update_success = await self._update_sub_patch_for_reply(
-                    thread, patch_card, in_reply_to_header
+            if not target_patch or target_patch_index is None:
+                logger.debug(
+                    f"Could not find target patch for reply: {in_reply_to_header}"
                 )
-            else:
-                # 单 PATCH：更新 overview 消息
-                update_success = await self._update_single_patch_for_reply(thread, patch_card)
+                return
 
-            # 如果更新成功，发送频道通知
-            if update_success:
+            # 2. 查找该 Patch 对应的 Discord 消息 ID
+            sub_patch_messages = thread.sub_patch_messages or {}
+            message_id = sub_patch_messages.get(str(target_patch_index))
+
+            if not message_id:
+                logger.warning(
+                    f"No message_id found for patch {target_patch_index} "
+                    f"in thread {thread.thread_id}"
+                )
+                return
+
+            # 3. 准备该 Patch 的 overview 数据
+            sub_overview = await self._prepare_patch_overview_data(
+                session, target_patch
+            )
+
+            if not sub_overview:
+                return
+
+            # 4. 更新该 Patch 的 Discord 消息
+            success = await self.thread_overview_renderer.update_sub_patch_message(
+                thread.thread_id,
+                message_id,
+                sub_overview,
+            )
+
+            if success:
+                logger.info(
+                    f"Updated patch [{target_patch_index}] message "
+                    f"in thread {thread.thread_id}"
+                )
                 await self._send_thread_update_notification(thread, patch_card)
+            else:
+                logger.warning(
+                    f"Failed to update patch [{target_patch_index}] message "
+                    f"in thread {thread.thread_id}"
+                )
 
         except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(
@@ -521,147 +576,84 @@ class FeedMessageService:
                 exc_info=True,
             )
 
-    async def _update_sub_patch_for_reply(
-        self, thread:PatchThread, patch_card:PatchCard, in_reply_to_header: str
-    ) -> bool:
-        """更新特定子 PATCH 的消息（多消息模式）
+    async def _find_target_patch_for_reply(
+        self, patch_card: PatchCard, in_reply_to_header: str
+    ) -> tuple:
+        """找到 REPLY 对应的 Patch
 
         Args:
-            thread: Thread 对象
             patch_card: PATCH 卡片对象
             in_reply_to_header: Reply 的 in_reply_to 头部
 
         Returns:
-            更新成功返回 True，失败返回 False
+            (target_patch, target_patch_index) 元组，如果找不到返回 (None, None)
         """
-        try:
-            from ..db.database import get_thread_service
-
-            # 查找 Reply 对应的子 PATCH
-            target_patch = None
-            target_patch_index = None
-
-            for patch in patch_card.series_patches or []:
-                patch_msg_id = patch.message_id
-                if patch_msg_id and patch_msg_id in in_reply_to_header:
-                    target_patch = patch
-                    target_patch_index = patch.patch_index
-                    break
-
-            if not target_patch or target_patch_index is None:
-                logger.debug(
-                    f"Could not find target sub-patch for reply: {in_reply_to_header}"
-                )
-                return False
-
-            # 查找该子 PATCH 的消息 ID
-            sub_patch_messages = thread.sub_patch_messages
-            message_id = sub_patch_messages.get(str(target_patch_index))
-
-            if not message_id:
-                logger.warning(
-                    f"No message_id found for sub-patch {target_patch_index}"
-                )
-                return False
-
-            # 查询整个系列的所有 Reply，然后准备该子 PATCH 的独立 overview 数据
-            async with get_thread_service() as service:
-                # 获取整个系列的所有回复
-                all_replies = await service.find_all_replies_to_patch(
-                    patch_card.message_id_header
-                )
-
-                # 为该子 PATCH 准备独立的 overview 数据
-                sub_overview = await service.prepare_sub_patch_overview_data(
-                    target_patch, all_replies
-                )
-
-            # 只更新该子 PATCH 的消息（使用 service 层准备好的数据）
-            success = await self.thread_overview_renderer.update_sub_patch_message(
-                thread.thread_id,
-                message_id,
-                sub_overview,
-            )
-
-            if success:
-                logger.info(
-                    f"Updated sub-patch [{target_patch_index}] message "
-                    f"in thread {thread.thread_id}"
-                )
-
-            return success
-
-        except (RuntimeError, ValueError, AttributeError) as e:
-            logger.error(
-                f"Failed to update sub-patch for reply: {e}",
-                exc_info=True,
-            )
-            return False
-
-    def _build_single_patch_info(self, patch_card):
-        """构建单 PATCH 的 SeriesPatchInfo 对象（辅助函数以减少重复）"""
         from .helpers import build_single_patch_info
+        from .thread_service import _extract_message_id_from_header
 
-        return build_single_patch_info(patch_card)
+        # 提取 in_reply_to 中的 message_id
+        in_reply_to = _extract_message_id_from_header(in_reply_to_header)
+        if not in_reply_to:
+            return None, None
 
-    async def _update_single_patch_for_reply(self, thread, patch_card) -> bool:
-        """更新单 PATCH 的消息
+        # 单 Patch：直接匹配
+        if not patch_card.is_series_patch:
+            if patch_card.message_id_header in in_reply_to:
+                single_patch = build_single_patch_info(patch_card)
+                return single_patch, 1
+            return None, None
+
+        # Series Patch：查找匹配的子 Patch
+        if patch_card.series_patches:
+            for patch in patch_card.series_patches:
+                if patch.patch_index == 0:  # 跳过 Cover Letter
+                    continue
+                if patch.message_id and patch.message_id in in_reply_to:
+                    return patch, patch.patch_index
+
+        return None, None
+
+    async def _prepare_patch_overview_data(self, session: AsyncSession, target_patch):
+        """准备 Patch 的 overview 数据
 
         Args:
-            thread: Thread 对象
-            patch_card: PATCH 卡片对象
+            session: 数据库会话
+            target_patch: 目标 Patch 对象
 
         Returns:
-            更新成功返回 True，失败返回 False
+            SubPatchOverviewData 对象，失败返回 None
         """
+        from .helpers import create_repositories_and_services
+        from .types import SubPatchOverviewData
+
         try:
-            from ..db.database import get_thread_service
+            (
+                _,
+                _,
+                _,
+                _,
+                thread_service,
+            ) = create_repositories_and_services(session)
 
-            # 查找单 PATCH 的消息 ID（使用 patch_index=1）
-            sub_patch_messages = thread.sub_patch_messages
-            message_id = sub_patch_messages.get("1")
-
-            if not message_id:
-                logger.warning(
-                    f"No message_id found for single patch in thread {thread.thread_id}"
-                )
-                return False
-
-            # 查询该 PATCH 的所有 Reply，然后准备独立的 overview 数据
-            async with get_thread_service() as service:
-                # 获取所有回复
-                all_replies = await service.find_all_replies_to_patch(
-                    patch_card.message_id_header
-                )
-
-                # 构建单 PATCH 信息
-                single_patch = self._build_single_patch_info(patch_card)
-
-                # 为该单 PATCH 准备独立的 overview 数据
-                sub_overview = await service.prepare_sub_patch_overview_data(
-                    single_patch, all_replies
-                )
-
-            # 更新单 PATCH 的消息（使用 service 层准备好的数据）
-            success = await self.thread_overview_renderer.update_sub_patch_message(
-                thread.thread_id,
-                message_id,
-                sub_overview,
+            patch_replies = await thread_service.get_all_replies_for_patch(
+                target_patch.message_id
             )
 
-            if success:
-                logger.info(
-                    f"Updated single patch message in thread {thread.thread_id}"
-                )
+            patch_reply_hierarchy = await thread_service.build_reply_hierarchy(
+                patch_replies, target_patch.message_id
+            )
 
-            return success
-
+            return SubPatchOverviewData(
+                patch=target_patch,
+                replies=patch_replies,
+                reply_hierarchy=patch_reply_hierarchy,
+            )
         except (RuntimeError, ValueError, AttributeError) as e:
             logger.error(
-                f"Failed to update single patch for reply: {e}",
+                f"Failed to prepare patch overview data: {e}",
                 exc_info=True,
             )
-            return False
+            return None
 
     def _convert_to_service_feed_message(
         self, feed_message, patch_info, series_message_id
