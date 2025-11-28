@@ -16,7 +16,8 @@ class FeedEntryMetadata:
     sender_email: Optional[str] = None
     content: Optional[str] = None
     link: Optional[str] = None
-    message_id: Optional[str] = None
+    message_id: Optional[str] = None  # Message-ID 头部
+    in_reply_to: Optional[str] = None  # In-Reply-To 头部
 
 
 @dataclass
@@ -110,3 +111,27 @@ class MonitoringResult:
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     errors: Optional[List[str]] = None
+
+
+@dataclass
+class PatchInfo:
+    """PATCH 信息"""
+
+    is_patch: bool = False
+    version: Optional[str] = None  # 版本号，如 "v5"
+    index: Optional[int] = None  # 序号，如 1
+    total: Optional[int] = None  # 总数，如 4
+    is_cover_letter: bool = False  # 是否是 0/n 封面信
+
+
+@dataclass
+class MessageClassification:
+    """消息分类结果"""
+
+    is_patch: bool = False
+    is_reply: bool = False
+    is_series_patch: bool = False
+    patch_info: Optional[PatchInfo] = None
+    series_message_id: Optional[str] = None
+    has_error: bool = False
+    error_message: Optional[str] = None

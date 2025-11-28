@@ -12,12 +12,10 @@ from .types import (
 )
 
 # Feed 类型名称列表（用于 __all__，避免与 lkml.__init__.py 中的重复）
-_FEED_TYPE_NAMES = [
+__all__ = [
     "FeedEntry",
     "FeedProcessResult",
     "SubsystemUpdate",
     "SubsystemMonitoringResult",
     "MonitoringResult",
 ]
-
-__all__ = _FEED_TYPE_NAMES  # pylint: disable=undefined-all-variable

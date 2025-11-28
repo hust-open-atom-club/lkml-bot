@@ -17,9 +17,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 from ..config import get_config
-from ..db.models import EmailMessage, Subsystem
-from ..db.repo import EMAIL_MESSAGE_REPO, EmailMessageData, SUBSYSTEM_REPO
-from .types import FeedEntry, FeedEntryContent, FeedProcessResult
+from ..db.models import Subsystem
+from ..db.repo import SUBSYSTEM_REPO
+from ..db.repo import FeedMessageRepository
+from ..service import FeedMessage
+from .types import (
+    FeedEntry,
+    FeedEntryContent,
+    FeedEntryMetadata,
+    FeedProcessResult,
+)
+from .feed_message_classifier import classify_message
 
 
 class FeedProcessor:
@@ -28,18 +36,26 @@ class FeedProcessor:
     负责从指定 URL 抓取 Atom feed，解析邮件条目，去重后存储到数据库。
     """
 
-    def __init__(self, *, database) -> None:
+    def __init__(
+        self, *, database, thread_manager=None, feed_message_service=None
+    ) -> None:
         """初始化 Feed 处理器
 
         Args:
             database: 数据库实例
+            thread_manager: Thread 管理器（可选，用于处理 PATCH 卡片和 REPLY）
+            feed_message_service: Feed 消息服务（可选，用于处理 PATCH 和 REPLY）
         """
-        # 使用 aware datetime（UTC）
+        self.database = database
+        self.thread_manager = thread_manager
+        self.feed_message_service = feed_message_service
+
+        # 初始化 last_update_dt
+        # 优先使用环境变量覆盖（用于调试/开发）
         cfg = get_config()
         override_iso = getattr(cfg, "last_update_dt_override_iso", None)
-        logger.info(f"override_iso: {override_iso}")
         if override_iso is not None:
-            # 优先使用 ISO8601 字符串覆盖（支持结尾 Z）
+            # 使用 ISO8601 字符串覆盖（支持结尾 Z）
             iso_str = str(override_iso).strip()
             try:
                 if iso_str.endswith("Z"):
@@ -50,12 +66,16 @@ class FeedProcessor:
                     self.last_update_dt = self.last_update_dt.replace(
                         tzinfo=timezone.utc
                     )
+                logger.info(
+                    f"Using LKML_LAST_UPDATE_AT override: {self.last_update_dt}"
+                )
             except (ValueError, AttributeError, TypeError):
-                self.last_update_dt = datetime.now(timezone.utc)
+                logger.warning(
+                    f"Invalid LKML_LAST_UPDATE_AT format: {override_iso}, using database query"
+                )
+                self.last_update_dt = None  # 标记需要从数据库查询
         else:
-            self.last_update_dt = datetime.now(timezone.utc)
-
-        self.database = database
+            self.last_update_dt = None  # 标记需要从数据库查询
 
     def _handle_feed_status(self, feed_status: Optional[int], feed_url: str) -> bool:
         """处理 feed 状态码，返回是否应该继续处理"""
@@ -240,21 +260,114 @@ class FeedProcessor:
         return None
 
     def _extract_in_reply_to_header(self, entry: FeedParserDict) -> Optional[str]:
-        """从条目中提取 in_reply_to_header"""
+        """从条目中提取 in_reply_to_header
+
+        从 thr:in-reply-to 的 href 属性提取父邮件的 URL，
+        然后解析出真正的 Message-ID。
+        """
         try:
             thr = entry.get("thr_in-reply-to") or entry.get("thr:in-reply-to")
             if isinstance(thr, dict):
+                # 优先从 href 提取（包含真正的邮件 URL）
+                href = thr.get("href")
+                if isinstance(href, str) and href:
+                    # 从 URL 中提取 Message-ID
+                    # 例如: https://lore.kernel.org/rust-for-linux/msg-id@domain.com/
+                    parsed_url = urlparse(href)
+                    path = parsed_url.path.strip("/")
+                    if path:
+                        parts = path.split("/")
+                        if len(parts) >= 2:
+                            return parts[-1]  # 返回 msg-id@domain.com
+
+                # 如果 href 不存在或提取失败，尝试使用 ref（可能是 UUID）
                 ref = thr.get("ref")
                 if isinstance(ref, str):
+                    # 如果是 UUID 格式，记录警告
+                    if ref.startswith("urn:uuid:"):
+                        logger.debug(
+                            f"In-Reply-To is UUID format: {ref}, may not work correctly"
+                        )
                     return ref
-        except (AttributeError, TypeError):
-            pass
+        except (AttributeError, TypeError, ValueError) as e:
+            logger.debug(f"Failed to extract in_reply_to_header: {e}")
         return None
 
-    async def save_email_message(
+    def _extract_feed_message_data(
+        self, entry: FeedParserDict, subsystem: Subsystem
+    ) -> Tuple[str, datetime, str, str, str]:
+        """提取 Feed 消息的基本数据
+
+        Returns:
+            (email, received_at, message_id, message_id_header, in_reply_to_header)
+        """
+        email = self.extract_email_from_author(entry.author)
+        received_at = self._extract_received_at(entry)
+        message_id = self._generate_message_id(entry, subsystem, received_at)
+        message_id_header = self._extract_message_id_header(entry)
+        in_reply_to_header = self._extract_in_reply_to_header(entry)
+        return (email, received_at, message_id, message_id_header, in_reply_to_header)
+
+    def _convert_repo_to_service_feed_message(
+        self, repo_data: "FeedMessageData"
+    ) -> FeedMessage:
+        """将 Repository 层的 FeedMessageData 转换为 Service 层的 FeedMessage"""
+        from ..service.helpers import extract_common_feed_message_fields
+
+        common_fields = extract_common_feed_message_fields(repo_data)
+        return FeedMessage(**common_fields)
+
+    async def _save_service_feed_message_to_repo(
+        self, feed_message_repo, service_feed_message_data
+    ):
+        """将 Service 层的 FeedMessage 转换为 Repo 层数据并保存"""
+        from ..db.repo import FeedMessageData as RepoFeedMessageData
+
+        from ..service.helpers import extract_common_feed_message_fields
+
+        common_fields = extract_common_feed_message_fields(service_feed_message_data)
+        repo_feed_message_data = RepoFeedMessageData(**common_fields)
+
+        return await feed_message_repo.create_or_update(data=repo_feed_message_data)
+
+    def _build_service_feed_message(  # pylint: disable=too-many-arguments
+        self,
+        entry: FeedParserDict,
+        subsystem: Subsystem,
+        email: str,
+        received_at: datetime,
+        message_id: str,
+        message_id_header: str,
+        in_reply_to_header: str,
+        classification,
+    ) -> FeedMessage:
+        """构建 Service 层的 FeedMessage 对象"""
+        patch_info = classification.patch_info
+        return FeedMessage(
+            subsystem_name=subsystem.name,
+            message_id=message_id,
+            message_id_header=message_id_header or message_id,
+            in_reply_to_header=in_reply_to_header,
+            subject=entry.title,
+            author=entry.author,
+            author_email=email or "unknown@example.com",
+            content=entry.get("summary", "") or entry.get("description", ""),
+            url=entry.link,
+            received_at=received_at,
+            is_patch=classification.is_patch,
+            is_reply=classification.is_reply,
+            is_series_patch=classification.is_series_patch,
+            patch_version=patch_info.version if patch_info else None,
+            patch_index=patch_info.index if patch_info else None,
+            patch_total=patch_info.total if patch_info else None,
+            is_cover_letter=patch_info.is_cover_letter if patch_info else False,
+            series_message_id=classification.series_message_id,
+        )
+
+    async def save_feed_message(
         self, session, entry: FeedParserDict, subsystem: Subsystem
-    ) -> EmailMessage:
-        """保存邮件消息到数据库
+    ):
+        """保存 Feed 消息到数据库
 
         Args:
             session: 数据库会话
@@ -262,73 +375,161 @@ class FeedProcessor:
             subsystem: 子系统对象
 
         Returns:
-            保存的邮件消息对象
+            保存的 Feed 消息对象
         """
-        email = self.extract_email_from_author(entry.author)
-        received_at = self._extract_received_at(entry)
-        message_id = self._generate_message_id(entry, subsystem, received_at)
-
-        existing_message = await EMAIL_MESSAGE_REPO.find_by_message_id(
-            session, message_id
+        # 提取基本数据
+        email, received_at, message_id, message_id_header, in_reply_to_header = (
+            self._extract_feed_message_data(entry, subsystem)
         )
-        if existing_message:
-            logger.debug(f"Message already exists: {message_id}")
-            return existing_message
 
-        message_id_header = self._extract_message_id_header(entry)
-        in_reply_to_header = self._extract_in_reply_to_header(entry)
+        # 创建 Repository 实例
+        feed_message_repo = FeedMessageRepository(session)
 
-        data = EmailMessageData(
-            subsystem=subsystem,
-            message_id=message_id,
+        # 检查是否已存在
+        if message_id_header:
+            existing_message_data = await feed_message_repo.find_by_message_id_header(
+                message_id_header
+            )
+            if existing_message_data:
+                logger.debug(f"Feed message already exists: {message_id_header}")
+                # 即使消息已存在，也需要分类并附加 _classification，以便后续处理 REPLY
+                classification = classify_message(
+                    subject=entry.title,
+                    in_reply_to_header=in_reply_to_header,
+                    message_id_header=message_id_header,
+                )
+                converted_message = self._convert_repo_to_service_feed_message(
+                    existing_message_data
+                )
+                # 附加分类信息以便后续处理
+                # pylint: disable=protected-access
+                converted_message._classification = classification  # type: ignore
+                return converted_message
+
+        # 使用标准化的消息分类器判断消息类型
+        classification = classify_message(
             subject=entry.title,
-            sender=entry.author,
-            sender_email=email or "unknown@example.com",
-            content=entry.get("summary", "") or entry.get("description", ""),
-            url=entry.link,
-            received_at=received_at,
-            message_id_header=message_id_header,
             in_reply_to_header=in_reply_to_header,
+            message_id_header=message_id_header,
         )
-        return await EMAIL_MESSAGE_REPO.create(session, data=data)
 
-    def _create_feed_entry(
-        self, email_message: EmailMessage, entry: FeedParserDict
-    ) -> FeedEntry:
-        """创建 FeedEntry 对象"""
-        is_reply = self.is_reply_message(entry.title)
-        is_patch = self.is_patch_message(entry.title)
-        content = FeedEntryContent(
-            summary=entry.get("summary", "") or entry.get("description", ""),
-            received_at=email_message.received_at.isoformat(),
-            is_reply=is_reply,
-            is_patch=is_patch,
+        # 调试日志：记录 Series Patch 的分类信息
+        if classification.is_series_patch and classification.patch_info:
+            logger.debug(
+                f"Series PATCH classified: subject={entry.title[:80]}, "
+                f"patch_index={classification.patch_info.index}/{classification.patch_info.total}, "
+                f"is_cover_letter={classification.patch_info.is_cover_letter}, "
+                f"series_message_id={classification.series_message_id[:50] if classification.series_message_id else None}"  # pylint: disable=line-too-long
+            )
+
+        # 构建 Service 层的 FeedMessage 对象
+        service_feed_message_data = self._build_service_feed_message(
+            entry,
+            subsystem,
+            email,
+            received_at,
+            message_id,
+            message_id_header,
+            in_reply_to_header,
+            classification,
         )
+
+        # 转换为 repo 层数据并保存
+        feed_message_data = await self._save_service_feed_message_to_repo(
+            feed_message_repo, service_feed_message_data
+        )
+
+        # 将分类结果附加到 feed_message_data 对象（用于后续处理）
+        # pylint: disable=protected-access
+        # _classification is used for internal processing, not part of public API
+        feed_message_data._classification = classification  # type: ignore
+
+        return feed_message_data
+
+    def _create_feed_entry(self, feed_message_data) -> FeedEntry:
+        """创建 FeedEntry 对象
+
+        Args:
+            feed_message_data: FeedMessageData 或 FeedMessage 对象
+        """
+
+        # 处理 received_at，可能是 datetime 对象或 None
+        received_at_str = ""
+        if feed_message_data.received_at:
+            if isinstance(feed_message_data.received_at, datetime):
+                received_at_str = feed_message_data.received_at.isoformat()
+            else:
+                received_at_str = str(feed_message_data.received_at)
+
+        content = FeedEntryContent(
+            summary=feed_message_data.content or "",
+            received_at=received_at_str,
+            is_reply=feed_message_data.is_reply,
+            is_patch=feed_message_data.is_patch,
+        )
+
+        # 构建元数据
+        metadata = FeedEntryMetadata(
+            message_id=feed_message_data.message_id_header,
+            in_reply_to=feed_message_data.in_reply_to_header,
+        )
+
         return FeedEntry(
-            id=email_message.id,
-            subject=entry.title,
-            author=entry.author,
-            email=self.extract_email_from_author(entry.author),
-            url=entry.link,
+            id=feed_message_data.id if hasattr(feed_message_data, "id") else None,
+            subject=feed_message_data.subject,
+            author=feed_message_data.author,
+            email=feed_message_data.author_email,
+            url=feed_message_data.url,
             content=content,
+            metadata=metadata,
         )
 
     async def _process_entries(
         self, session, entries: List[FeedParserDict], subsystem: Subsystem
     ) -> Tuple[int, int, List[FeedEntry]]:
-        """处理条目并返回统计信息"""
+        """处理条目并返回统计信息
+
+        分两个阶段：
+        1. 先将所有 feed_message 入库
+        2. 再批量处理（创建 Patch Card、处理 Reply）
+
+        这样可以避免 Cover Letter 先到达时，子 PATCH 还未入库的时序问题。
+        """
         new_count = 0
         reply_count = 0
         processed_entries: List[FeedEntry] = []
 
+        # 阶段 1: 保存所有 feed_message 到数据库
+        saved_messages = []
         for entry in entries:
-            email_message = await self.save_email_message(session, entry, subsystem)
-            is_reply = self.is_reply_message(entry.title)
-            if is_reply:
+            feed_message = await self.save_feed_message(session, entry, subsystem)
+            saved_messages.append((feed_message, entry))
+
+            # 统计消息类型
+            if feed_message.is_reply:
                 reply_count += 1
             else:
                 new_count += 1
-            processed_entries.append(self._create_feed_entry(email_message, entry))
+
+        # 阶段 2: 批量处理所有 feed_message
+        for feed_message, entry in saved_messages:
+            # 处理 PATCH 卡片生成和 REPLY 逻辑
+            # 使用附加的分类信息（不存储在模型中）
+            if hasattr(feed_message, "_classification") and self.feed_message_service:
+                # pylint: disable=protected-access
+                # _classification is used for internal processing, not part of public API
+                classification = feed_message._classification  # type: ignore
+                try:
+                    await self.feed_message_service.process_email_message(
+                        session, feed_message, classification
+                    )
+                except (RuntimeError, ValueError, AttributeError) as e:
+                    logger.error(
+                        f"Failed to process feed message: {e}",
+                        exc_info=True,
+                    )
+
+            processed_entries.append(self._create_feed_entry(feed_message))
 
         return (new_count, reply_count, processed_entries)
 
@@ -341,6 +542,56 @@ class FeedProcessor:
             self.last_update_dt = datetime(
                 *latest_entry.updated_parsed[:6], tzinfo=timezone.utc
             )
+
+    async def _initialize_last_update_dt(self, subsystem_name: str) -> None:
+        """从数据库初始化 last_update_dt
+
+        如果 last_update_dt 为 None，从数据库中查询该子系统最新的 received_at
+
+        Args:
+            subsystem_name: 子系统名称
+        """
+        if self.last_update_dt is not None:
+            return  # 已经初始化（使用环境变量覆盖）
+
+        try:
+            async with self.database.get_db_session() as session:
+                from sqlalchemy import select, func
+                from ..db.models import FeedMessageModel
+
+                # 查询该子系统最新的 received_at
+                result = await session.execute(
+                    select(func.max(FeedMessageModel.received_at))
+                    .join(Subsystem)
+                    .where(Subsystem.name == subsystem_name)
+                )
+                max_received_at = result.scalar()
+
+                if max_received_at:
+                    # 确保为 aware datetime
+                    if max_received_at.tzinfo is None:
+                        self.last_update_dt = max_received_at.replace(
+                            tzinfo=timezone.utc
+                        )
+                    else:
+                        self.last_update_dt = max_received_at
+                    logger.info(
+                        f"Initialized last_update_dt from database for {subsystem_name}: "
+                        f"{self.last_update_dt}"
+                    )
+                else:
+                    # 没有历史数据，使用当前时间
+                    self.last_update_dt = datetime.now(timezone.utc)
+                    logger.info(
+                        f"No historical data for {subsystem_name}, using current time: "
+                        f"{self.last_update_dt}"
+                    )
+        except (RuntimeError, ValueError) as e:
+            logger.warning(
+                f"Failed to initialize last_update_dt from database: {e}, "
+                f"using current time"
+            )
+            self.last_update_dt = datetime.now(timezone.utc)
 
     async def process_feed(
         self, subsystem_name: str, feed_url: str
@@ -355,6 +606,10 @@ class FeedProcessor:
             Feed 处理结果，包含新增数量、回复数量和条目列表
         """
         logger.info(f"Processing feed for subsystem: {subsystem_name}")
+
+        # 初始化 last_update_dt（如果还没有初始化）
+        await self._initialize_last_update_dt(subsystem_name)
+
         proc_start = time.time()
 
         entries = self.get_feed_entries(feed_url)
