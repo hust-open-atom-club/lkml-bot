@@ -103,7 +103,24 @@ exclude = '''
 [tool.pylint."MESSAGES CONTROL"]
 disable = [
     # TODO 注释
-    "fixme"
+    "fixme",
+    # 设计选择相关的警告
+    "too-many-instance-attributes",  # R0902
+    "too-few-public-methods",  # R0903
+    # 日志格式化：允许使用 f-string（更清晰易读）
+    "logging-fstring-interpolation",  # W1203
+    # 导入顺序：某些导入需要在函数内部（避免循环导入）
+    "wrong-import-position",  # C0413
+    "wrong-import-order",  # C0411
+    # 导入位置：某些导入需要在函数内部（避免循环导入）
+    "import-outside-toplevel",  # C0415
+    # 函数参数：某些函数需要多个参数，拆分会导致代码复杂化
+    "too-many-arguments",  # R0913
+    "too-many-positional-arguments",  # R0917
+    # try-except-raise：某些情况下需要重新抛出异常
+    "try-except-raise",  # W0706
+    # 代码重复：dataclass 定义之间的重复是合理的架构设计（不同层的数据结构）
+    "duplicate-code",  # R0801
 ]
 
 [tool.pylint."FORMAT"]
