@@ -16,11 +16,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+from typing import TYPE_CHECKING
+
 from ..config import get_config
 from ..db.models import Subsystem
 from ..db.repo import SUBSYSTEM_REPO
 from ..db.repo import FeedMessageRepository
 from ..service import FeedMessage
+
+if TYPE_CHECKING:
+    from ..db.repo import FeedMessageData
 from .types import (
     FeedEntry,
     FeedEntryContent,
@@ -561,9 +566,9 @@ class FeedProcessor:
 
                 # 查询该子系统最新的 received_at
                 result = await session.execute(
-                    select(func.max(FeedMessageModel.received_at))
-                    .join(Subsystem)
-                    .where(Subsystem.name == subsystem_name)
+                    select(func.max(FeedMessageModel.received_at)).where(
+                        FeedMessageModel.subsystem_name == subsystem_name
+                    )
                 )
                 max_received_at = result.scalar()
 
