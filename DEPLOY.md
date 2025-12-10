@@ -36,6 +36,12 @@ DISCORD_BOTS='[{"token": "YOUR_BOT_TOKEN", "intent": {"guild_messages": true, "d
 
 # Discord Webhook URL（用于发送通知消息）
 LKML_DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+
+# Discord Bot Token（必需）
+LKML_DISCORD_BOT_TOKEN=YOUR_BOT_TOKEN_HERE
+
+# Discord 频道 ID（用于发送通知消息）
+LKML_DISCORD_CHANNEL_ID=CHANNEL_ID
 ```
 
 #### 可选环境变量
