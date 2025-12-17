@@ -1,6 +1,7 @@
 """订阅子系统命令模块"""
 
 from nonebot import on_message
+import re
 from nonebot.adapters import Event, Message
 from nonebot.exception import FinishedException
 from nonebot.log import logger
@@ -29,72 +30,144 @@ async def handle_subscribe(event: Event, message: Message = EventMessage()):
     try:
         # 获取消息纯文本（Discord 适配器会自动去除 mention）
         text = message.extract_plain_text().strip()
-        logger.info(f"Subscribe command handler triggered, text: '{text}'")
+        logger.info("Subscribe command handler triggered, text: '%s'", text)
 
-        # 检查命令匹配
-        command_text = extract_command(text, "/subscribe")
+        command_text = extract_command(text, "/subscribe") or extract_command(
+            text, "/sub"
+        )
         if command_text is None:
-            logger.debug(f"Text does not match '/subscribe', returning. Text: '{text}'")
-            return
-
-        # 解析命令参数
-        parts = command_text.split()
-        if len(parts) < 2:
-            await SubscribeCmd.finish(
-                "subscribe: 缺少 <subsystem>\n用法: @机器人 /subscribe <subsystem>"
+            logger.debug(
+                "Text does not match '/subscribe' or '/sub', returning. Text: '%s'",
+                text,
             )
             return
 
-        subsystem = parts[1].strip()
-        logger.info(f"Processing subscribe request for subsystem: {subsystem}")
-
-        if not subsystem:
-            await SubscribeCmd.finish("subscribe: 子系统名称不能为空")
+        parts = command_text.split()
+        if len(parts) < 2:
+            await SubscribeCmd.finish(
+                "subscribe: 缺少参数\n用法: @机器人 /subscribe|/sub <subsystem...>\n子命令: available | subscribed"
+            )
             return
+
+        action = parts[1].strip().lower()
+        logger.info("Processing subscribe request, action: %s", action)
 
         # 获取用户信息
         user_id, user_name = await get_user_info_or_finish(event, SubscribeCmd)
 
-        # 调用服务进行订阅
-        try:
-            success = await lkml_service.subscribe_subsystem(
-                operator_id=str(user_id),
-                operator_name=str(user_name),
-                subsystem_name=subsystem,
-            )
+        if action == "list":
+            await _handle_subscribe_list()
+            return
 
-            if success:
-                await SubscribeCmd.finish(f"✅ 已订阅子系统: {subsystem}")
-                return
-
-            # 订阅失败，检查原因
-            config = get_config()
-            supported = config.get_supported_subsystems()
-            if subsystem not in supported:
-                await SubscribeCmd.finish(
-                    f"❌ 不支持的子系统: {subsystem}\n"
-                    f"支持的子系统: {', '.join(supported)}"
-                )
-            else:
-                await SubscribeCmd.finish("❌ 订阅失败，请稍后重试")
-        except FinishedException:  # pylint: disable=try-except-raise
-            # FinishedException 由 matcher.finish() 抛出，需要重新抛出以终止处理
-            raise
-        except (ValueError, RuntimeError, AttributeError) as e:
-            logger.error(f"Error in subscribe_subsystem: {e}", exc_info=True)
-            await SubscribeCmd.finish(f"❌ 订阅时发生错误: {str(e)}")
+        await _handle_subscribe_batch(action, parts, user_id, user_name)
     except FinishedException:  # pylint: disable=try-except-raise
         # FinishedException 由 matcher.finish() 抛出，需要重新抛出以终止处理
         raise
     except (ValueError, RuntimeError, AttributeError) as e:
-        logger.error(f"Unexpected error in handle_subscribe: {e}", exc_info=True)
+        logger.error("Unexpected error in handle_subscribe: %s", e, exc_info=True)
         await SubscribeCmd.finish(f"❌ 处理命令时发生错误: {str(e)}")
+
+
+async def _handle_subscribe_list() -> None:
+    """处理订阅列表查询逻辑。"""
+    try:
+        config = get_config()
+        supported = config.get_supported_subsystems()
+        subscribed = await lkml_service.get_subscribed_subsystems()
+        await SubscribeCmd.finish(
+            "可订阅的子系统: "
+            + ", ".join(supported)
+            + "\n"
+            + "已订阅的子系统: "
+            + ", ".join(subscribed)
+        )
+    except FinishedException:
+        raise
+    except (ValueError, RuntimeError, AttributeError) as e:
+        logger.error("Error in list subcommands: %s", e, exc_info=True)
+        await SubscribeCmd.finish(f"❌ 列表查询时发生错误: {str(e)}")
+
+
+async def _handle_subscribe_batch(
+    _action: str, parts: list[str], user_id: str, user_name: str
+) -> None:
+    """处理批量订阅逻辑。"""
+    raw_args = " ".join(parts[1:])
+    targets = [x.strip() for x in re.split(r"[,\s]+", raw_args) if x.strip()]
+    if not targets:
+        await SubscribeCmd.finish("subscribe: 子系统名称不能为空")
+        return
+
+    logger.info("Processing batch subscribe for subsystems: %s", targets)
+
+    try:
+        config = get_config()
+        supported = set(config.get_supported_subsystems())
+        prev_subscribed = set(await lkml_service.get_subscribed_subsystems())
+
+        result_lines = await _subscribe_targets(
+            targets, supported, prev_subscribed, user_id, user_name
+        )
+        await SubscribeCmd.finish("\n".join(result_lines))
+    except FinishedException:
+        raise
+    except (ValueError, RuntimeError, AttributeError) as e:
+        logger.error("Error in batch subscribe: %s", e, exc_info=True)
+        await SubscribeCmd.finish(f"❌ 订阅时发生错误: {str(e)}")
+
+
+async def _subscribe_targets(
+    targets: list[str],
+    supported: set[str],
+    prev_subscribed: set[str],
+    user_id: str,
+    user_name: str,
+) -> list[str]:
+    """执行具体的订阅循环并返回结果行。"""
+    newly_subscribed: list[str] = []
+    already_subscribed: list[str] = []
+    unsupported: list[str] = []
+    failed: list[str] = []
+
+    for name in sorted(set(targets)):
+        if name not in supported:
+            unsupported.append(name)
+            continue
+        try:
+            ok = await lkml_service.subscribe_subsystem(
+                operator_id=str(user_id),
+                operator_name=str(user_name),
+                subsystem_name=name,
+            )
+            if not ok:
+                failed.append(name)
+            elif name in prev_subscribed:
+                already_subscribed.append(name)
+            else:
+                newly_subscribed.append(name)
+        except FinishedException:
+            raise
+        except (ValueError, RuntimeError, AttributeError) as e:
+            logger.error("Error subscribing %s: %s", name, e, exc_info=True)
+            failed.append(name)
+
+    lines: list[str] = ["subscribe: 批量订阅结果"]
+    if newly_subscribed:
+        lines.append("✅ 新订阅: " + ", ".join(newly_subscribed))
+    if already_subscribed:
+        lines.append("ℹ️ 已订阅: " + ", ".join(already_subscribed))
+    if unsupported:
+        lines.append("❌ 不支持: " + ", ".join(unsupported))
+    if failed:
+        lines.append("⚠️ 失败: " + ", ".join(failed))
+
+    return lines
 
 
 # 在导入时注册命令元信息（非管理员命令）
 register_command(
     name="subscribe",
-    usage="/subscribe <subsystem>",
-    description="订阅一个子系统的邮件列表",
+    usage="/(subscribe | sub) <subsystem...> | list",
+    description="订阅子系统；查询可订阅/已订阅列表",
     admin_only=False,
 )

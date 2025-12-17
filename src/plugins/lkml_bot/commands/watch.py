@@ -13,7 +13,6 @@ from nonebot.adapters.discord import MessageCreateEvent
 from nonebot.params import EventMessage
 from nonebot.exception import FinishedException
 from nonebot.log import logger
-from sqlalchemy.exc import SQLAlchemyError
 
 from lkml.feed.feed_message_classifier import parse_patch_subject
 from lkml.service import (
@@ -24,19 +23,14 @@ from lkml.service import (
 )
 from lkml.service.types import FeedMessage
 
+from ..client.discord_client import check_thread_exists
+
 from ..shared import (
     register_command,
     extract_command,
     get_user_info_or_finish,
-)
-from ..renders.patch_card.renderer import PatchCardRenderer
-from ..renders.patch_card import FeishuPatchCardRenderer
-from ..renders.thread.renderer import ThreadOverviewRenderer
-from ..client import (
-    DiscordHTTPError,
-    FormatPatchError,
-    check_thread_exists,
-    create_discord_thread,
+    get_patch_card_sender,
+    get_thread_sender,
 )
 
 
@@ -111,9 +105,6 @@ async def handle_watch(_event: Event, message: Message = EventMessage()):
 
     except FinishedException:  # pylint: disable=try-except-raise
         raise
-    except (SQLAlchemyError, DiscordHTTPError, FormatPatchError) as e:
-        logger.error(f"Failed to watch PATCH: {e}", exc_info=True)
-        await WatchCmd.finish("❌ 关注失败，请联系管理员查看日志")
     except (ValueError, KeyError, AttributeError) as e:
         logger.error(f"Data error watching PATCH: {e}", exc_info=True)
         await WatchCmd.finish("❌ 关注失败，请联系管理员查看日志")
@@ -340,14 +331,22 @@ async def _create_patch_card(feed_message, patch_info, matcher) -> Optional[Patc
 
         config = get_config()
 
-        # 1. 渲染并发送到
+        # 1. 构建 PatchCard 数据
         temp_patch_card = _build_temp_patch_card(feed_message, patch_info, config)
 
-        renderer = PatchCardRenderer(config)
-        platform_message_id = await renderer.render_and_send(temp_patch_card)
+        # 2. 使用统一的多平台发送器发送
+        patch_card_sender = get_patch_card_sender()
+        if not patch_card_sender:
+            logger.error("PatchCard sender not initialized")
+            await matcher.finish(
+                f"❌ 创建 PATCH 订阅记录失败: `{feed_message.message_id_header}`\n\n"
+                "系统配置错误，请联系管理员。"
+            )
+            return None
 
-        feishu_renderer = FeishuPatchCardRenderer(config)
-        await feishu_renderer.render_and_send(temp_patch_card)
+        platform_message_id, platform_channel_id = (
+            await patch_card_sender.send_patch_card(temp_patch_card)
+        )
 
         if not platform_message_id:
             logger.error(
@@ -359,14 +358,14 @@ async def _create_patch_card(feed_message, patch_info, matcher) -> Optional[Patc
             )
             return None
 
-        # 2. 保存到数据库
+        # 3. 保存到数据库
         service_feed_message = _build_service_feed_message(feed_message, patch_info)
 
         async with get_patch_card_service() as service:
             patch_card = await service.create_patch_card(
                 feed_message=service_feed_message,
                 platform_message_id=platform_message_id,
-                platform_channel_id=config.platform_channel_id,
+                platform_channel_id=platform_channel_id or config.platform_channel_id,
                 timeout_hours=24,
             )
 
@@ -378,7 +377,7 @@ async def _create_patch_card(feed_message, patch_info, matcher) -> Optional[Patc
 
         return patch_card
 
-    except (SQLAlchemyError, ValueError, KeyError, AttributeError) as e:
+    except (ValueError, KeyError, AttributeError) as e:
         logger.error(
             f"Failed to create PATCH card from FeedMessage: {e}", exc_info=True
         )
@@ -538,15 +537,39 @@ async def _create_new_thread(patch_card: PatchCard, matcher) -> Optional[str]:
     Returns:
         Thread ID，失败返回 None
     """
-    from ..config import get_config
-
-    config = get_config()
-
     try:
-        # 1. 创建 Discord Thread
+        # 1. 准备 Thread Overview 数据
+        async with get_thread_service() as service:
+            overview_data = await service.prepare_thread_overview_data(
+                patch_card.message_id_header
+            )
+
+        if not overview_data:
+            logger.error(
+                f"Failed to prepare thread overview data "
+                f"for {patch_card.message_id_header}"
+            )
+            await matcher.finish(
+                f"❌ 创建 Thread 失败: `{patch_card.message_id_header}`\n\n"
+                "无法准备 Thread Overview 数据，请联系管理员查看日志。"
+            )
+            return None
+
+        # 2. 使用统一的多平台 Thread 发送服务创建 Thread 并发送 Overview
+        thread_sender = get_thread_sender()
+        if not thread_sender:
+            logger.error("Thread sender not initialized")
+            await matcher.finish(
+                f"❌ 创建 Thread 失败: `{patch_card.message_id_header}`\n\n"
+                "系统配置错误，请联系管理员。"
+            )
+            return None
+
         thread_name = patch_card.subject[:100]
-        thread_id, is_existing = await create_discord_thread(
-            config, thread_name, patch_card.platform_message_id
+        thread_id, sub_patch_messages = (
+            await thread_sender.create_thread_and_send_overview(
+                thread_name, patch_card.platform_message_id, overview_data
+            )
         )
 
         if not thread_id:
@@ -561,18 +584,9 @@ async def _create_new_thread(patch_card: PatchCard, matcher) -> Optional[str]:
             )
             return None
 
-        # 处理已存在的 Thread
-        if is_existing:
-            logger.info(f"Thread {thread_id} already exists, returning it")
-            async with get_thread_service() as service:
-                existing_thread = await service.find_by_thread_id(thread_id)
-                if existing_thread:
-                    await _handle_existing_thread(existing_thread, patch_card, matcher)
-                    return thread_id
-
         logger.info(f"Created Discord Thread: {thread_name} (ID: {thread_id})")
 
-        # 2. 保存 Thread 记录并准备数据
+        # 3. 保存 Thread 记录
         async with get_thread_service() as service:
             await service.create(patch_card.message_id_header, thread_id, thread_name)
             logger.info(
@@ -581,34 +595,13 @@ async def _create_new_thread(patch_card: PatchCard, matcher) -> Optional[str]:
                 f"name={thread_name}"
             )
 
-            overview_data = await service.prepare_thread_overview_data(
-                patch_card.message_id_header
-            )
-
-        # 3. 渲染并发送 Thread Overview（多消息模式）
-        if overview_data:
-            renderer = ThreadOverviewRenderer(config)
-
-            # 使用多消息模式：每个子 PATCH 一条消息
-            sub_patch_messages = await renderer.render_and_send(
-                thread_id, overview_data
-            )
-
             # 保存子 PATCH 消息映射
             if sub_patch_messages:
-                async with get_thread_service() as service:
-                    await service.update_sub_patch_messages(
-                        thread_id, sub_patch_messages
-                    )
-                    logger.info(
-                        f"Saved {len(sub_patch_messages)} sub-patch messages "
-                        f"for thread {thread_id}"
-                    )
-        else:
-            logger.error(
-                f"Failed to prepare thread overview data "
-                f"for {patch_card.message_id_header}"
-            )
+                await service.update_sub_patch_messages(thread_id, sub_patch_messages)
+                logger.info(
+                    f"Saved {len(sub_patch_messages)} sub-patch messages "
+                    f"for thread {thread_id}"
+                )
 
         # 4. 标记 PatchCard 为已建立 Thread
         async with get_patch_card_service() as service:
@@ -623,8 +616,6 @@ async def _create_new_thread(patch_card: PatchCard, matcher) -> Optional[str]:
         RuntimeError,
         ValueError,
         AttributeError,
-        SQLAlchemyError,
-        DiscordHTTPError,
     ) as e:
         logger.error(f"Failed to create new thread: {e}", exc_info=True)
         await matcher.finish("❌ 创建 Thread 失败\n\n请联系管理员查看日志。")
