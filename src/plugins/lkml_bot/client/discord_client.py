@@ -1,6 +1,10 @@
 """Discord 客户端
 
 负责所有 Discord REST API 的 HTTP 调用。
+
+在当前重构中，本模块既提供底层函数式 API（兼容现有代码），
+也提供基于接口的 `DiscordClient` 类，以便在多平台架构中作为
+Discord 的唯一客户端实例使用。
 """
 
 import asyncio
@@ -13,6 +17,8 @@ from lkml.feed.feed_message_classifier import parse_patch_subject
 
 from .exceptions import DiscordHTTPError, FormatPatchError
 from .discord_params import PatchCardParams
+from .base import PatchCardClient, ThreadClient
+from ..renders.types import DiscordRenderedPatchCard, DiscordRenderedThreadOverview
 
 # Discord embed description 限制为 4096 字符
 DISCORD_EMBED_DESCRIPTION_MAX_LENGTH = 4096
@@ -848,3 +854,143 @@ async def update_message_in_thread(
     except (ValueError, KeyError) as e:
         logger.error(f"Data error updating message in Thread: {e}", exc_info=True)
         return False
+
+
+class DiscordClient(
+    PatchCardClient, ThreadClient
+):  # pylint: disable=too-few-public-methods
+    """Discord 客户端类
+
+    作为 Discord 的唯一客户端实例，封装所有与 Discord 交互的能力。
+
+    - PatchCard 能力：发送订阅卡片（Patch Card）
+    - Thread 能力：创建 Thread、发送/更新 Thread 消息、发送 Thread 更新通知
+    """
+
+    def __init__(self, config):
+        """初始化 DiscordClient
+
+        Args:
+            config: 插件配置对象（包含 discord_bot_token、platform_channel_id 等）
+        """
+        self.config = config
+
+    # ========== PatchCardClient 接口实现 ==========
+
+    async def send_patch_card(
+        self, rendered_data: DiscordRenderedPatchCard
+    ) -> Optional[str]:
+        """发送 Patch Card 到 Discord
+
+        Args:
+            rendered_data: 渲染后的 PatchCard 数据
+
+        Returns:
+            Discord 消息 ID，失败返回 None
+        """
+        return await send_discord_embed(
+            self.config,
+            rendered_data.params,
+            rendered_data.description,
+            embed_color=rendered_data.embed_color,
+            title=rendered_data.title,
+        )
+
+    # ========== ThreadClient 接口实现 ==========
+
+    async def create_thread(
+        self, thread_name: str, message_id: str
+    ) -> Tuple[Optional[str], bool]:
+        """创建 Discord Thread（或获取已存在的 Thread）"""
+        return await create_discord_thread(self.config, thread_name, message_id)
+
+    async def send_thread_overview(
+        self, thread_id: str, overview_data
+    ) -> Dict[int, str]:
+        """发送 Thread Overview 消息到 Discord Thread
+
+        Args:
+            thread_id: Discord Thread ID
+            overview_data: DiscordRenderedThreadOverview 渲染结果
+
+        Returns:
+            {patch_index: message_id} 映射
+        """
+
+        if not isinstance(overview_data, DiscordRenderedThreadOverview):
+            logger.error(
+                f"Invalid overview_data type: {type(overview_data)}, "
+                "expected DiscordRenderedThreadOverview"
+            )
+            return {}
+
+        sub_patch_messages: Dict[int, str] = {}
+        messages = overview_data.messages
+
+        for patch_index, message in messages.items():
+            try:
+                msg_id = await send_message_to_thread(
+                    self.config,
+                    thread_id,
+                    content=message.content,
+                    embed=message.embed,
+                )
+
+                if msg_id:
+                    sub_patch_messages[patch_index] = msg_id
+                    logger.info(
+                        f"Sent thread message for patch [{patch_index}] to thread {thread_id}, "
+                        f"message_id={msg_id}"
+                    )
+                else:
+                    logger.warning(
+                        f"Failed to send thread message for patch [{patch_index}] to thread {thread_id}"
+                    )
+
+                # 添加延迟以避免触发 Discord rate limit
+                await asyncio.sleep(0.2)
+            except Exception as e:  # pylint: disable=broad-except
+                logger.error(
+                    f"Error sending thread message for patch [{patch_index}]: {e}",
+                    exc_info=True,
+                )
+
+        return sub_patch_messages
+
+    async def update_thread_overview(
+        self, thread_id: str, message_id: str, overview_data
+    ) -> bool:
+        """更新 Thread Overview 消息
+
+        Args:
+            thread_id: Discord Thread ID
+            message_id: 要更新的消息 ID
+            overview_data: DiscordRenderedThreadMessage 渲染结果
+
+        Returns:
+            成功返回 True，失败返回 False
+        """
+        from ..renders.types import DiscordRenderedThreadMessage
+
+        if not isinstance(overview_data, DiscordRenderedThreadMessage):
+            logger.error(
+                f"Invalid overview_data type: {type(overview_data)}, "
+                "expected DiscordRenderedThreadMessage"
+            )
+            return False
+
+        return await update_message_in_thread(
+            self.config,
+            thread_id,
+            message_id,
+            overview_data.content,
+            embed=overview_data.embed,
+        )
+
+    async def send_thread_update_notification(
+        self, channel_id: str, thread_id: str, platform_message_id: Optional[str] = None
+    ) -> bool:
+        """发送 Thread 更新通知到频道"""
+        return await send_thread_update_notification(
+            self.config, channel_id, thread_id, platform_message_id
+        )
