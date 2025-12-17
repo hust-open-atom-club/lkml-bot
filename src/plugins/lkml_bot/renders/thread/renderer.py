@@ -1,13 +1,10 @@
 """Thread 渲染器
 
-Plugins 层渲染器：只负责渲染 Thread Overview 并发送到 Discord。
-所有业务逻辑由 Service 层处理。
+Plugins 层渲染器：只负责渲染 Thread Overview。
+所有业务逻辑由 Service 层处理，发送由客户端处理。
 """
 
-import asyncio
 from typing import Dict
-
-from nonebot.log import logger
 
 from lkml.service import FeedMessage
 from lkml.service.types import (
@@ -16,108 +13,79 @@ from lkml.service.types import (
     ThreadOverviewData,
 )
 
-from ...client import (
-    send_message_to_thread as api_send_message_to_thread,
-    update_message_in_thread,
-)
+from ..types import DiscordRenderedThreadMessage, DiscordRenderedThreadOverview
 
 
 class ThreadOverviewRenderer:
     """Thread Overview 渲染器
 
     职责：
-    1. 将 ThreadOverviewData 渲染成文本
-    2. 发送到 Discord Thread
-    3. 仅此而已
+    1. 将 ThreadOverviewData 渲染成 Discord 格式
+    2. 仅此而已
 
     不做：
     - 数据查询
     - 业务逻辑判断
     - 数据库操作
+    - 发送消息（由客户端负责）
     """
 
     def __init__(self, config):
         """初始化渲染器
 
         Args:
-            config: 配置对象
+            config: 配置对象（保留以便未来扩展）
         """
         self.config = config
 
-    async def render_and_send(
-        self, thread_id: str, overview_data: ThreadOverviewData
-    ) -> dict:
-        """渲染并发送 Thread Overview
+    def render(
+        self, overview_data: ThreadOverviewData
+    ) -> DiscordRenderedThreadOverview:
+        """渲染 Thread Overview 为 Discord 格式（不发送）
 
-        为每个 PATCH 发送一条独立的消息。
-        - 系列 PATCH：为每个子 PATCH 发送一条消息
-        - 单 PATCH：发送一条 overview 消息
+        为每个 PATCH 渲染一条独立的消息。
+        - 系列 PATCH：为每个子 PATCH 渲染一条消息
+        - 单 PATCH：渲染一条 overview 消息
 
         Args:
-            thread_id: Discord Thread ID
             overview_data: Thread Overview 数据
 
         Returns:
-            PATCH 消息映射 {patch_index: message_id}，失败返回空字典
+            DiscordRenderedThreadOverview 渲染结果
         """
-        try:
-            sub_patch_messages = {}
 
-            # 使用 service 层准备好的 sub_patch_overviews
-            if overview_data.sub_patch_overviews:
-                sub_patch_overviews = overview_data.sub_patch_overviews
+        messages: Dict[int, DiscordRenderedThreadMessage] = {}
 
-                logger.info(
-                    f"Rendering {len(sub_patch_overviews)} patches for thread {thread_id}"
+        # 使用 service 层准备好的 sub_patch_overviews
+        if overview_data.sub_patch_overviews:
+            for sub_overview in overview_data.sub_patch_overviews:
+                patch = sub_overview.patch
+                patch_index = patch.patch_index
+
+                # 渲染子 PATCH 消息
+                patch_content = self._render_sub_patch(sub_overview)
+                patch_content += "\n\n---\n"
+
+                messages[patch_index] = DiscordRenderedThreadMessage(
+                    content=patch_content, embed=None
                 )
 
-                for sub_overview in sub_patch_overviews:
-                    patch = sub_overview.patch
-                    patch_index = patch.patch_index
-                    subject = patch.subject[:60]
+        return DiscordRenderedThreadOverview(messages=messages)
 
-                    # 渲染子 PATCH 消息（直接使用 service 层准备好的数据）
-                    patch_content = self._render_sub_patch(sub_overview)
+    def render_sub_patch(
+        self, sub_overview: SubPatchOverviewData
+    ) -> DiscordRenderedThreadMessage:
+        """渲染单个子 PATCH 消息（用于更新）
 
-                    patch_content += "\n\n---\n"
+        Args:
+            sub_overview: 子 PATCH 的完整 Overview 数据
 
-                    # 发送消息
-                    logger.debug(
-                        f"Sending sub-patch [{patch_index}] to thread {thread_id}: {subject}"
-                    )
-                    msg_id = await api_send_message_to_thread(
-                        self.config, thread_id, patch_content
-                    )
-
-                    if msg_id:
-                        sub_patch_messages[patch_index] = msg_id
-                        logger.info(
-                            f"✓ Sent sub-patch [{patch_index}] to thread {thread_id}, "
-                            f"message_id={msg_id}"
-                        )
-                    else:
-                        logger.warning(
-                            f"✗ Failed to send sub-patch [{patch_index}] to thread {thread_id}: {subject}"
-                        )
-
-                    # 添加延迟以避免触发 Discord rate limit
-                    # 为每个子 PATCH 消息之间添加 200ms 延迟
-                    await asyncio.sleep(0.2)
-            else:
-                logger.warning(
-                    f"No sub_patch_overviews available in overview_data for thread {thread_id}"
-                )
-
-            logger.info(
-                f"Sent {len(sub_patch_messages)} patch messages to thread {thread_id}"
-            )
-            return sub_patch_messages
-
-        except (RuntimeError, ValueError, AttributeError) as e:
-            logger.error(
-                f"Failed to render and send multi-message overview: {e}", exc_info=True
-            )
-            return {}
+        Returns:
+            DiscordRenderedThreadMessage 渲染结果
+        """
+        content = self._render_sub_patch(sub_overview)
+        content += "\n\n---\n"
+        return DiscordRenderedThreadMessage(content=content, embed=None)
 
     def _render_sub_patch(self, sub_overview: SubPatchOverviewData) -> str:
         """渲染单个子 PATCH 消息
@@ -204,45 +172,3 @@ class ThreadOverviewRenderer:
                     lines.extend(child_lines)
 
         return lines
-
-    async def update_sub_patch_message(
-        self,
-        thread_id: str,
-        message_id: str,
-        sub_overview: SubPatchOverviewData,
-    ) -> bool:
-        """更新单个子 PATCH 消息
-
-        Args:
-            thread_id: Discord Thread ID
-            message_id: 要更新的消息 ID
-            sub_overview: 子 PATCH 的完整 Overview 数据（由 service 层准备）
-
-        Returns:
-            是否更新成功
-        """
-        try:
-            # 直接使用 service 层准备好的数据渲染
-            content = self._render_sub_patch(sub_overview)
-
-            content += "\n\n---\n"
-
-            # 更新消息
-            success = await update_message_in_thread(
-                self.config, thread_id, message_id, content
-            )
-
-            if success:
-                logger.info(
-                    f"Updated sub-patch message in thread {thread_id}, message_id={message_id}"
-                )
-            else:
-                logger.error(
-                    f"Failed to update sub-patch message in thread {thread_id}"
-                )
-
-            return success
-
-        except (RuntimeError, ValueError, AttributeError) as e:
-            logger.error(f"Failed to update sub-patch message: {e}", exc_info=True)
-            return False
