@@ -32,6 +32,8 @@ pip install -e ".[dev]"
 创建 `.env` 文件（或在系统环境变量中设置）：
 
 ```bash
+DISCORD_BOTS='[{"token": "YOUR_BOT_TOKEN", "intent": {"guild_messages": true, "direct_messages": true}}]'
+
 # Discord Bot Token（必需）
 LKML_DISCORD_BOT_TOKEN=YOUR_BOT_TOKEN_HERE
 
@@ -80,6 +82,7 @@ python bot.py
 
 | 环境变量 | 说明 | 示例 |
 |---------|------|------|
+| `DISCORD_BOTS` | Discord Bot Token JSON 配置 | `[{"token": "YOUR_TOKEN", ...}]` |
 | `LKML_DISCORD_BOT_TOKEN` | Discord Bot Token | `YOUR_BOT_TOKEN_HERE` |
 | `LKML_DISCORD_CHANNEL_ID` | Discord 频道 ID | `CHANNEL_ID` |
 | `LKML_DISCORD_WEBHOOK_URL` | Discord Webhook URL，用于发送通知消息。如果未配置，消息只会在日志中记录 | - |

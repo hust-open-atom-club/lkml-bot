@@ -113,6 +113,7 @@ PORT=8080
 ### 无法连接到 Discord
 
 - 检查 `DISCORD_BOTS` 环境变量格式是否正确（JSON 格式）
+- 检查 `LKML_DISCORD_BOT_TOKEN` 环境变量是否正确配置
 - 确认 Bot Token 是否有效
 - 检查网络连接是否正常
 
