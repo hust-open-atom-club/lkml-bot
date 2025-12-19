@@ -42,7 +42,11 @@ from lkml.config import set_config  # noqa: E402
 from lkml.db import set_database, LKMLDatabase, Base  # noqa: E402
 from lkml.feed.feed import FeedProcessor  # noqa: E402
 from lkml.feed.feed_monitor import LKMLFeedMonitor  # noqa: E402
-from lkml.feed.vger_subsystems import get_vger_subsystems  # noqa: E402
+from lkml.feed.vger_subsystems import (
+    get_vger_subsystems,
+    start_daily_update_task,
+    update_vger_subsystems_cache,
+)  # noqa: E402
 from lkml.scheduler import LKMLScheduler  # noqa: E402
 
 # 本地导入
@@ -207,7 +211,24 @@ driver = get_driver()
 
 @driver.on_startup
 async def auto_start_monitoring():
-    """在 bot 启动时自动启动监控任务"""
+    """在 bot 启动时自动启动监控任务并初始化 vger 子系统缓存"""
+    try:
+        # 初始化 vger 子系统缓存
+        logger.info("Initializing vger subsystems cache on bot startup")
+        cache_updated = await update_vger_subsystems_cache()
+        if cache_updated:
+            logger.info("Vger subsystems cache initialized successfully")
+        else:
+            logger.warning(
+                "Failed to initialize vger subsystems cache, will retry later"
+            )
+
+        # 启动每日自动更新任务
+        start_daily_update_task()
+        logger.info("Daily vger subsystems cache update task scheduled")
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error(f"Failed to initialize vger subsystems cache: {e}", exc_info=True)
+
     try:
         # pylint: disable=import-outside-toplevel  # noqa: E402
         from lkml.scheduler import get_scheduler
