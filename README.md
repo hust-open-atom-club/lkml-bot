@@ -113,28 +113,33 @@ python bot.py
 @lkml-bot /help
 ```
 
-#### `/subscribe <subsystem>`
-订阅一个子系统的邮件列表。订阅后，当该子系统有新邮件或回复时，你会收到通知。
+#### `/subscribe` / `/sub`
+订阅或管理子系统的邮件列表。订阅后，当该子系统有新邮件或回复时，你会收到通知。
 
-**参数：**
-- `<subsystem>`: 子系统名称，如 `lkml`、`rust-for-linux`、`netdev`、`dri-devel` 等
+支持的用法：
 
-**示例：**
-```
-@lkml-bot /subscribe lkml
-@lkml-bot /subscribe rust-for-linux
-```
+- 订阅单个子系统：
+  - `@lkml-bot /subscribe rust-for-linux`
+  - `@lkml-bot /sub rust-for-linux`
+- 批量订阅多个子系统（空格或逗号分隔）：
+  - `@lkml-bot /subscribe linux-kernel netdev dri-devel`
+  - `@lkml-bot /sub linux-kernel,netdev,dri-devel`
+- 查看当前订阅和所有可订阅的子系统（Discord Embed 展示，5 个一行）：
+  - `@lkml-bot /subscribe list`
+- 按关键字模糊搜索可订阅子系统：
+  - `@lkml-bot /subscribe search linux`
 
-#### `/unsubscribe <subsystem>`
-取消订阅一个子系统的邮件列表。
+#### `/unsubscribe` / `/unsub`
+取消订阅一个或多个子系统的邮件列表。
 
-**参数：**
-- `<subsystem>`: 子系统名称
+支持的用法：
 
-**示例：**
-```
-@lkml-bot /unsubscribe lkml
-```
+- 取消订阅单个子系统：
+  - `@lkml-bot /unsubscribe rust-for-linux`
+  - `@lkml-bot /unsub rust-for-linux`
+- 批量取消订阅多个子系统（空格或逗号分隔）：
+  - `@lkml-bot /unsubscribe linux-kernel netdev dri-devel`
+  - `@lkml-bot /unsub linux-kernel,netdev,dri-devel`
 
 #### `/start-monitor`
 启动邮件列表监控定时任务。启动后，机器人会定期检查所有已订阅的子系统，并在发现新邮件时发送通知。
@@ -271,7 +276,7 @@ author_email: /@(?:.*\.)?@gmail\.com$/
 
 ## TODO
 
-- [ ] 实现从服务器缓存获取 vger 子系统列表的功能（`src/lkml/vger_cache.py`）
+- [x] 实现从服务器缓存获取 vger 子系统列表的功能（`src/lkml/vger_cache.py`）
   - Bot 的服务器缓存会存储所有从 vger 获取的内核子系统信息（键值对格式）
   - 需要在 `get_vger_subsystems_from_cache()` 函数中实现从服务器缓存读取逻辑
   - 函数应返回子系统名称列表，例如: `["lkml", "netdev", "dri-devel", ...]`
