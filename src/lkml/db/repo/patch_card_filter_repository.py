@@ -1,23 +1,29 @@
 """PATCH 卡片过滤规则仓储类"""
 
+import logging
 from typing import List, Optional
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import PatchCardFilterModel
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class PatchCardFilterData:
-    """PATCH 卡片过滤规则数据类"""
+    """PATCH 卡片过滤规则数据类
+
+    每个过滤器就是一个规则组，规则组内不同条件使用 AND 逻辑，
+    多个规则组（过滤器）之间使用 OR 逻辑。
+    """
 
     id: int
     name: str
     enabled: bool
-    exclusive: bool  # 是否独占模式
-    filter_conditions: dict
+    filter_conditions: dict  # 过滤条件，不同 key 之间使用 AND 逻辑
     description: Optional[str] = None
     created_by: Optional[str] = None
     created_at: Optional[object] = None
@@ -44,12 +50,22 @@ class PatchCardFilterRepository:
         Returns:
             PatchCardFilterData 实例
         """
+        import json
+
+        # 处理 filter_conditions：如果是字符串，尝试解析为 JSON
+        filter_conditions = model.filter_conditions
+        if isinstance(filter_conditions, str):
+            try:
+                filter_conditions = json.loads(filter_conditions)
+            except (json.JSONDecodeError, ValueError):
+                # 如果解析失败，使用空字典
+                filter_conditions = {}
+
         return PatchCardFilterData(
             id=model.id,
             name=model.name,
             enabled=model.enabled,
-            exclusive=model.exclusive,
-            filter_conditions=model.filter_conditions or {},
+            filter_conditions=filter_conditions or {},
             description=model.description,
             created_by=model.created_by,
             created_at=model.created_at,
@@ -72,8 +88,6 @@ class PatchCardFilterRepository:
             filter_conditions=data.filter_conditions,
             description=data.description,
             created_by=data.created_by,
-            created_at=data.created_at,
-            updated_at=data.updated_at,
         )
 
     async def create(self, data: PatchCardFilterData) -> PatchCardFilterData:
@@ -85,17 +99,45 @@ class PatchCardFilterRepository:
         Returns:
             创建的过滤规则数据
         """
-        model = PatchCardFilterModel(
-            name=data.name,
-            enabled=data.enabled,
-            exclusive=data.exclusive,
-            filter_conditions=data.filter_conditions,
-            description=data.description,
-            created_by=data.created_by,
+        import json
+        from sqlalchemy import text
+
+        # 显式序列化 JSON 数据，确保 SQLite 能正确存储
+        # SQLite 的 JSON 列在 SQLAlchemy 中可能无法正确序列化复杂对象
+        filter_conditions_json = json.dumps(data.filter_conditions, ensure_ascii=False)
+
+        # 使用原生 SQL 插入，确保 JSON 数据正确存储
+        await self.session.execute(
+            text(
+                """
+                INSERT INTO patch_card_filters (
+                    name, enabled, filter_conditions, description, created_by,
+                    created_at, updated_at
+                )
+                VALUES (
+                    :name, :enabled, :filter_conditions, :description, :created_by,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+            """
+            ),
+            {
+                "name": data.name,
+                "enabled": data.enabled,
+                "filter_conditions": filter_conditions_json,
+                "description": data.description,
+                "created_by": data.created_by,
+            },
         )
-        self.session.add(model)
         await self.session.flush()
-        await self.session.refresh(model)
+
+        # 重新查询以获取插入的记录
+        result = await self.session.execute(
+            select(PatchCardFilterModel).where(PatchCardFilterModel.name == data.name)
+        )
+        model = result.scalar_one_or_none()
+        if not model:
+            raise RuntimeError(f"Failed to retrieve inserted filter: {data.name}")
+
         return self._model_to_data(model)
 
     async def find_by_id(self, filter_id: int) -> Optional[PatchCardFilterData]:
@@ -158,6 +200,9 @@ class PatchCardFilterRepository:
         Returns:
             更新后的过滤规则数据，如果不存在则返回 None
         """
+        import json
+        from sqlalchemy import text
+
         result = await self.session.execute(
             select(PatchCardFilterModel).where(PatchCardFilterModel.id == filter_id)
         )
@@ -165,14 +210,37 @@ class PatchCardFilterRepository:
         if not model:
             return None
 
-        model.name = data.name
-        model.enabled = data.enabled
-        model.exclusive = data.exclusive
-        model.filter_conditions = data.filter_conditions
-        model.description = data.description
+        # 显式序列化 JSON 数据，确保 SQLite 能正确存储
+        filter_conditions_json = json.dumps(data.filter_conditions, ensure_ascii=False)
 
+        # 使用原生 SQL 更新，确保 JSON 数据正确存储
+        await self.session.execute(
+            text(
+                """
+                UPDATE patch_card_filters 
+                SET name = :name, enabled = :enabled, filter_conditions = :filter_conditions, 
+                    description = :description, updated_at = CURRENT_TIMESTAMP
+                WHERE id = :filter_id
+            """
+            ),
+            {
+                "filter_id": filter_id,
+                "name": data.name,
+                "enabled": data.enabled,
+                "filter_conditions": filter_conditions_json,
+                "description": data.description,
+            },
+        )
         await self.session.flush()
-        await self.session.refresh(model)
+
+        # 重新查询以获取更新后的记录
+        result = await self.session.execute(
+            select(PatchCardFilterModel).where(PatchCardFilterModel.id == filter_id)
+        )
+        model = result.scalar_one_or_none()
+        if not model:
+            raise RuntimeError(f"Failed to retrieve updated filter: {filter_id}")
+
         return self._model_to_data(model)
 
     async def delete(self, filter_id: int) -> bool:
@@ -185,15 +253,10 @@ class PatchCardFilterRepository:
             是否删除成功
         """
         result = await self.session.execute(
-            select(PatchCardFilterModel).where(PatchCardFilterModel.id == filter_id)
+            delete(PatchCardFilterModel).where(PatchCardFilterModel.id == filter_id)
         )
-        model = result.scalar_one_or_none()
-        if not model:
-            return False
-
-        await self.session.delete(model)
         await self.session.flush()
-        return True
+        return result.rowcount > 0
 
     async def toggle_enabled(self, filter_id: int, enabled: bool) -> bool:
         """切换过滤规则的启用状态
