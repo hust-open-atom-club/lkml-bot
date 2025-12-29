@@ -7,6 +7,9 @@ from abc import ABC, abstractmethod
 from typing import Optional
 from contextlib import asynccontextmanager
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 延迟导入 Service 类以避免循环导入
 # Service 类只在 with_services 方法中使用，不会在模块级别导入
@@ -136,8 +139,7 @@ class LKMLDatabase(Database):  # pylint: disable=too-few-public-methods
     async def _ensure_tables(self):
         """确保数据库表已创建
 
-        首次调用时自动创建表结构。
-        本项目不考虑历史迁移场景；如需变更结构，请手动清空或重建数据库。
+        首次调用时自动创建表结构，然后执行数据库迁移。
         """
         if not self._tables_created:
             self._init_engine()
@@ -148,6 +150,18 @@ class LKMLDatabase(Database):  # pylint: disable=too-few-public-methods
                         sync_conn, checkfirst=True
                     )
                 )
+
+            # 执行数据库迁移
+            try:
+                from .migrations import run_database_migrations
+
+                success = await run_database_migrations(self._engine)
+                if not success:
+                    logger.warning("Some database migrations failed, but continuing...")
+            except (RuntimeError, ValueError, AttributeError, ImportError) as e:
+                logger.error(f"Failed to run database migrations: {e}", exc_info=True)
+                # 迁移失败不影响表创建，继续执行
+
             self._tables_created = True
 
     @asynccontextmanager
@@ -157,13 +171,31 @@ class LKMLDatabase(Database):  # pylint: disable=too-few-public-methods
         Yields:
             数据库会话对象，使用完毕后自动提交或回滚
         """
+        from nonebot.exception import FinishedException
+
         self._init_engine()
         await self._ensure_tables()
         async with self._session_factory() as session:
             try:
                 yield session
                 await session.commit()
-            except BaseException:  # 捕获所有异常（包括 KeyboardInterrupt）以进行回滚
+            except FinishedException:
+                # FinishedException 是 NoneBot 框架的正常流程异常，用于结束消息处理
+                # 在抛出前先提交数据库更改，不要回滚
+                try:
+                    await session.commit()
+                except (RuntimeError, ValueError) as commit_error:
+                    logger.warning(
+                        f"Failed to commit after FinishedException: {commit_error}"
+                    )
+                    await session.rollback()
+                raise
+            except (
+                BaseException
+            ) as e:  # 捕获其他所有异常（包括 KeyboardInterrupt）以进行回滚
+                logger.error(
+                    f"Database session commit failed, rolling back: {e}", exc_info=True
+                )
                 await session.rollback()
                 raise
             finally:
