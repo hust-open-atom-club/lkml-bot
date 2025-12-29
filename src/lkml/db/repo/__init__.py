@@ -10,6 +10,10 @@ from .patch_card_filter_repository import (
     PatchCardFilterData,
     PatchCardFilterRepository,
 )
+from .filter_config_repository import (
+    FilterConfigData,
+    FilterConfigRepository,
+)
 from .subsystem_repository import SUBSYSTEM_REPO
 
 __all__ = [
@@ -25,6 +29,9 @@ __all__ = [
     # Patch Card Filter
     "PatchCardFilterData",
     "PatchCardFilterRepository",
+    # Filter Config
+    "FilterConfigData",
+    "FilterConfigRepository",
     # Subsystem
     "SUBSYSTEM_REPO",
 ]

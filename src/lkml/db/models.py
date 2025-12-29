@@ -143,6 +143,10 @@ class PatchCardModel(Base):  # pylint: disable=too-few-public-methods
         Integer, nullable=True, default=0
     )  # PATCH 总数（如 1/4 中的 4），默认 0
 
+    to_cc_list = Column(
+        JSON, nullable=True
+    )  # To 和 CC 列表（从 root patch 抓取，JSON 格式存储邮箱列表，合并去重）
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     expires_at = Column(DateTime, nullable=False, index=True)  # 过期时间（24小时后）
 
@@ -175,6 +179,23 @@ class PatchThreadModel(Base):  # pylint: disable=too-few-public-methods
     archived_at = Column(DateTime, nullable=True)  # Thread 归档时间
 
 
+class FilterConfigModel(Base):  # pylint: disable=too-few-public-methods
+    """过滤配置模型
+
+    存储过滤器的全局配置项。
+    """
+
+    __tablename__ = "filter_config"
+
+    id = Column(Integer, primary_key=True, index=True)
+    key = Column(String(100), nullable=False, unique=True, index=True)  # 配置键
+    value = Column(JSON, nullable=False)  # 配置值（JSON 格式）
+    description = Column(Text, nullable=True)  # 配置描述
+    updated_at = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False
+    )
+
+
 class PatchCardFilterModel(Base):  # pylint: disable=too-few-public-methods
     """PATCH 卡片过滤规则模型
 
@@ -187,16 +208,16 @@ class PatchCardFilterModel(Base):  # pylint: disable=too-few-public-methods
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), nullable=False, unique=True, index=True)  # 规则名称
     enabled = Column(Boolean, default=True, nullable=False, index=True)  # 是否启用
-    exclusive = Column(
-        Boolean, default=False, nullable=False, index=True
-    )  # 是否独占模式（True=只允许匹配的创建，False=所有都创建但高亮匹配的）
 
     # 过滤条件（JSON 格式存储）
     # 支持的字段：
     # - author: 作者名称（字符串或列表，支持正则）
     # - author_email: 作者邮箱（字符串或列表，支持正则）
-    # - subject_keywords: 主题关键词（列表，任意匹配）
-    # - subject_regex: 主题正则表达式（字符串）
+    # - subject: 主题（字符串或列表，支持正则）
+    # - subsys/subsystem: 子系统名称（字符串或列表，支持正则）
+    # - keywords: 内容关键词（字符串或列表，支持正则，从邮件内容中匹配）
+    # - cclist/cc: CC 列表（字符串或列表，支持正则，从 root patch 的 CC 列表中匹配）
+    # 规则组内不同条件使用 AND 逻辑，多个规则组之间使用 OR 逻辑
     filter_conditions = Column(JSON, nullable=False)  # 过滤条件
 
     description = Column(Text, nullable=True)  # 规则描述
