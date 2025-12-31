@@ -110,7 +110,8 @@ def _handle_type() -> str:
 
     lines.append("\n模式格式:")
     lines.append("• 普通文本: 精确/包含匹配（大小写不敏感）")
-    lines.append("• /regex/: 正则匹配（大小写不敏感）")
+    lines.append("• /regex/: 正则匹配（区分大小写，默认）")
+    lines.append("• /regex/i: 正则匹配（不区分大小写，标准 i 标志）")
     lines.append("• 列表: 逗号分隔，表示 OR 逻辑（任一匹配即可）")
 
     return "\n".join(lines)

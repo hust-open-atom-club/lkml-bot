@@ -181,17 +181,24 @@ python bot.py
 
 条件格式（仅支持 key=value；逗号表示列表）：
 
-- 文本匹配：普通字符串按“子串包含”匹配（大小写不敏感）
-- 正则匹配：用 `/.../` 包裹，按不区分大小写的正则匹配
-- 列表：逗号分隔，表示“任一匹配即可”
+- 文本匹配：普通字符串按"子串包含"匹配（大小写不敏感）
+- 正则匹配：用 `/.../` 包裹，默认区分大小写；用 `/.../i` 则不区分大小写（标准 i 标志）
+- 列表：逗号分隔，表示"任一匹配即可"
 - 数字：自动转整型，例如 `min_patch_total=3`
 
 常用键：
 
-- `author` 作者名，支持字符串或正则或列表
-- `author_email` 作者邮箱，同上
-- `subject_keywords` 邮件标题关键词列表
-- `subject_regex` 邮件标题正则
+- author: 作者名称（字符串或列表，支持正则）
+- author_email: 作者邮箱（字符串或列表，支持正则）
+- subsys | subsystem: 子系统名称（字符串或列表，支持正则）
+- subject: 主题（字符串或列表，支持正则）
+- keywords: 内容关键词（字符串或列表，支持正则，从邮件内容中匹配）
+- cclist | cc: To/CC 列表（字符串或列表，支持正则，从 root patch 的 To 和 CC 列表中匹配）
+
+模式格式:
+- 普通文本: 精确/包含匹配（大小写不敏感）
+- /regex/: 正则匹配（大小写敏感）
+- 列表: 逗号分隔，表示 OR 逻辑（任一匹配即可）
 
 模式说明：
 
@@ -284,12 +291,14 @@ author_email: /@(?:.*\.)?@gmail\.com$/
   - 目前所有命令都可以使用，`check_admin()` 函数暂时返回 `True`
   - 后续需要实现 Discord 用户/角色权限验证
   - 管理员命令（如 `/start-monitor`、`/stop-monitor`、`/run-monitor`）应限制为特定用户或角色才能执行
-- [ ] 实现 `/add-user` 命令
+- [x] 实现 `/add-user` 命令
   - 添加用户过滤功能，支持在子系统邮件列表中搜索指定用户/组织
   - 启用后仅发送来自已订阅用户的特定邮件
-- [ ] 实现 `/del-user` 命令
+> /filter rule add demo-filter author_email=xxx@gmail.com,yyy@gmail.com
+- [x] 实现 `/del-user` 命令
   - 删除已添加的用户过滤
   - 移除后不再发送与该用户相关的邮件信息
+> /filter rule del demo-filter author_email=xxx@gmail.com
 - [ ] 实现 `/news` 命令
   - 强制发送当前时间最新的前 N 条邮件列表记录
   - 支持指定子系统或所有已订阅子系统

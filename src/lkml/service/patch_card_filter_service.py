@@ -104,6 +104,44 @@ class PatchCardFilterService:
         # 没有匹配的规则，默认允许创建（保持原有行为）
         return (True, [])
 
+    def _parse_regex_pattern(self, pattern_str: str) -> tuple[str | None, bool]:
+        """解析正则表达式模式
+
+        Args:
+            pattern_str: 模式字符串
+
+        Returns:
+            (pattern, case_insensitive) 元组
+            - pattern: 提取的正则表达式模式，如果不是正则则返回 None
+            - case_insensitive: 是否不区分大小写
+        """
+        if not pattern_str.startswith("/"):
+            return (None, False)
+
+        if pattern_str.endswith("/i"):
+            return (pattern_str[1:-2], True)  # 不区分大小写
+        if pattern_str.endswith("/"):
+            return (pattern_str[1:-1], False)  # 区分大小写
+
+        return (None, False)
+
+    def _match_single_pattern(self, val: str, pattern_str: str) -> bool:
+        """匹配单个模式
+
+        Args:
+            val: 要匹配的值
+            pattern_str: 模式字符串
+
+        Returns:
+            True 表示匹配，False 表示不匹配
+        """
+        pattern, case_insensitive = self._parse_regex_pattern(pattern_str)
+        if pattern is not None:
+            flags = re.IGNORECASE if case_insensitive else 0
+            return bool(re.search(pattern, val, flags))
+        # 普通字符串匹配（不区分大小写）
+        return pattern_str.lower() in val.lower()
+
     def _match_value(self, val: str, cond) -> bool:
         """匹配单个值是否满足条件
 
@@ -116,23 +154,15 @@ class PatchCardFilterService:
         """
         if not val:
             return False
+
         if isinstance(cond, str):
-            if cond.startswith("/") and cond.endswith("/"):
-                return bool(re.search(cond[1:-1], val, re.IGNORECASE))
-            return cond.lower() in val.lower()
+            return self._match_single_pattern(val, cond)
+
         if isinstance(cond, list):
-            for c in cond:
-                if isinstance(c, str):
-                    # 检查正则匹配或字符串包含
-                    is_regex = c.startswith("/") and c.endswith("/")
-                    matched = (
-                        bool(re.search(c[1:-1], val, re.IGNORECASE))
-                        if is_regex
-                        else c.lower() in val.lower()
-                    )
-                    if matched:
-                        return True
-            return False
+            return any(
+                self._match_single_pattern(val, c) for c in cond if isinstance(c, str)
+            )
+
         return True
 
     async def _match_cc_condition(self, feed_message: FeedMessage, condition) -> bool:
